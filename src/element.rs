@@ -14,6 +14,16 @@ impl UiElement {
         Self { raw, automation }
     }
 
+    /// Get the underlying IUIAutomationElement for integration with other systems.
+    pub fn raw_element(&self) -> &IUIAutomationElement {
+        &self.raw
+    }
+
+    /// Get a clone of the underlying IUIAutomationElement.
+    pub fn raw_element_clone(&self) -> IUIAutomationElement {
+        self.raw.clone()
+    }
+
     pub fn name(&self) -> String {
         unsafe { self.raw.CurrentName().map(|s| s.to_string()).unwrap_or_default() }
     }
