@@ -116,6 +116,64 @@ let first = xpath.select_first(&root)?;    // 返回第一个匹配节点（Opti
 let result = xpath.evaluate(&root)?;       // 返回任意类型结果
 ```
 
+## XPath 智能优化器（实测示例）
+
+优化器将冗长、脆弱的 XPath 压缩为简洁、稳定的表达式。
+
+### 输入 → 输出（实测）
+
+**输入**（14 层嵌套，~900 字符）：
+```
+//Pane[@ClassName='ChromeWidgetWin1' ...]/Pane.../Document[@AutomationId='RootWebArea' ...]/Group/.../Group[@ClassName='temp-dialogue-btntemp-dialogue-btnBOp4 ...']
+```
+
+**锚点选择**：`Document[11]`（得分 18，含 `AutomationId='RootWebArea'`）
+
+**anchor_relative（主推荐）**：
+```xpath
+//Document[@AutomationId='RootWebArea']/Group/Group/Group[starts-with(@ClassName, 'temp-dialogue-btntemp-dialogue-btn')]
+```
+
+**minimal（备选）**：
+```xpath
+//Document[@AutomationId='RootWebArea']//Group[starts-with(@ClassName, 'temp-dialogue-btntemp-dialogue-btn')]
+```
+
+**压缩率**：92%
+
+### 三个核心算法
+
+#### 1. 动态 ClassName 检测 `is_dynamic_class`
+
+判断标准：
+- 超过 2 个空格分隔的 token
+- 或任意 token 中的 camelCase 词含有随机特征（纯大写词、大写+数字混合词）
+
+**识别示例**：`chatmainPagewilLn`、`btnBOp4`、`ZJ07f` 都能正确识别为动态类名。
+
+#### 2. 稳定前缀提取 `extract_stable_prefix`
+
+算法流程：
+1. 先按 `-` 分割
+2. 再对每段做 camelCase 词边界拆分
+3. 找到第一个随机词就截断
+
+**示例**：
+```
+temp-dialogue-btnBOp4
+→ 拆出 ["temp", "dialogue", "btn|BOp4"]
+→ btn 的 camel 词中 BOp4 是随机词
+→ 稳定前缀: temp-dialogue-btn
+```
+
+#### 3. 锚点评分 `anchor_score`
+
+评分规则：
+- **AutomationId**：权重最高（10 分）
+- **语义化标签**：`Document`/`Edit`/`Button` 等额外加分
+- **容器标签**：`Pane`/`Group` 得 0 分
+- 保证选出语义最强的节点作为跳转起点
+
 ## 依赖
 
 - Windows 10/11

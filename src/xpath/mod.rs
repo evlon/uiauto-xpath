@@ -6,6 +6,7 @@ pub mod functions;
 pub mod lexer;
 pub mod parser;
 pub mod value;
+pub mod optimizer;
 
 use crate::element::UiElement;
 use crate::error::Result;
@@ -38,5 +39,10 @@ impl XPath {
 
     pub fn select_first(&self, root: &UiElement) -> Result<Option<UiElement>> {
         Ok(self.select_nodes(root)?.into_iter().next())
+    }
+
+    // src/xpath/mod.rs
+    pub fn optimize(xpath: &str) -> Result<optimizer::OptimizeResult> {
+        optimizer::optimize(xpath, &optimizer::OptimizeOptions::default())
     }
 }
