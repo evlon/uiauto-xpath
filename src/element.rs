@@ -24,6 +24,12 @@ impl UiElement {
         self.raw.clone()
     }
 
+    /// Reconstruct a UiElement from raw IUIAutomationElement and IUIAutomation.
+    /// Useful for integration with external systems that already have raw elements.
+    pub fn from_raw(raw: IUIAutomationElement, automation: IUIAutomation) -> Self {
+        Self { raw, automation }
+    }
+
     pub fn name(&self) -> String {
         unsafe { self.raw.CurrentName().map(|s| s.to_string()).unwrap_or_default() }
     }
