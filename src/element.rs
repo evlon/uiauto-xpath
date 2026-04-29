@@ -64,7 +64,9 @@ impl UiElement {
             "name" => Some(self.name()),
             "classname" | "class" => Some(self.class_name()),
             "automationid" | "id" => Some(self.automation_id()),
-            "controltype" | "type" => Some(self.control_type_name()),
+            // ControlType: 返回标准英文名称（与 element-selector 一致）
+            // 整数映射：UIA50000=Button, UIA50003=Pane, UIA50004=Document, etc.
+            "controltype" | "type" => Some(control_type_id_to_name(self.control_type_id())),
             "controltypeid" => Some(self.control_type_id().to_string()),
             "enabled" | "isenabled" => Some(self.is_enabled().to_string()),
             "offscreen" | "isoffscreen" => Some(self.is_offscreen().to_string()),
@@ -75,10 +77,10 @@ impl UiElement {
         }
     }
 
-    /// 节点名（XPath 节点测试）：使用控件类型本地化名 (Button, Edit, ...)
+    /// 节点名（XPath 节点测试）：使用控件类型标准英文名称 (Button, Pane, Document, ...)
+    /// 与 element-selector 的 control_type_name 保持一致
     pub fn node_name(&self) -> String {
-        let s = self.control_type_name();
-        if s.is_empty() { "Element".to_string() } else { s.replace(' ', "") }
+        control_type_id_to_name(self.control_type_id())
     }
 
     pub fn children(&self) -> Result<Vec<UiElement>> {
@@ -154,6 +156,55 @@ impl UiElement {
                 .map(|b| b.as_bool()).unwrap_or(false)
         }
     }
+}
+
+/// 将 UIA ControlType 整数 ID 转换为标准英文名称
+fn control_type_id_to_name(id: i32) -> String {
+    match id {
+        50000 => "Button",
+        50001 => "Calendar",
+        50002 => "CheckBox",
+        50003 => "ComboBox",
+        50004 => "Edit",
+        50005 => "Hyperlink",
+        50006 => "Image",
+        50007 => "ListItem",
+        50008 => "List",
+        50009 => "Menu",
+        50010 => "MenuBar",
+        50011 => "MenuItem",
+        50012 => "ProgressBar",
+        50013 => "RadioButton",
+        50014 => "ScrollBar",
+        50015 => "Slider",
+        50016 => "Spinner",
+        50017 => "StatusBar",
+        50018 => "Tab",
+        50019 => "TabItem",
+        50020 => "Text",
+        50021 => "ToolBar",
+        50022 => "ToolTip",
+        50023 => "Tree",
+        50024 => "TreeItem",
+        50025 => "Custom",
+        50026 => "Group",
+        50027 => "Thumb",
+        50028 => "DataGrid",
+        50029 => "DataItem",
+        50030 => "Document",
+        50031 => "SplitButton",
+        50032 => "Window",
+        50033 => "Pane",
+        50034 => "Header",
+        50035 => "HeaderItem",
+        50036 => "Table",
+        50037 => "TitleBar",
+        50038 => "Separator",
+        50039 => "SemanticZoom",
+        50040 => "AppBar",
+        50041 => "Pane",
+        _ => "Element",
+    }.to_string()
 }
 
 impl std::fmt::Debug for UiElement {

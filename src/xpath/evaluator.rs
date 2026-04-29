@@ -124,7 +124,9 @@ fn eval_path(p: &PathExpr, ctx: &Context) -> Result<Value> {
 }
 
 fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Result<Vec<UiElement>> {
-    for step in steps {
+    log::debug!("[XPath step_through] Starting with {} nodes", nodes.len());
+    for (step_idx, step) in steps.iter().enumerate() {
+        log::debug!("[XPath step_through] Step {}: axis={:?}, test={:?}, predicates={}", step_idx, step.axis, step.test, step.predicates.len());
         let mut next: Vec<UiElement> = Vec::new();
         for n in &nodes {
             let mut candidates = if step.axis == Axis::Attribute {
@@ -132,13 +134,16 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
             } else {
                 axes::select_axis(n, step.axis)?
             };
+            log::debug!("[XPath step_through] Step {}: {} candidates from axis", step_idx, candidates.len());
             // 节点测试
             candidates.retain(|c| node_test_match(c, &step.test, step.axis));
+            log::debug!("[XPath step_through] Step {}: {} after node test", step_idx, candidates.len());
 
             // predicate（按 step 的轴方向考虑 position）
             for pred in &step.predicates {
                 candidates = apply_predicate(&candidates, pred, ctx)?;
             }
+            log::debug!("[XPath step_through] Step {}: {} after predicates", step_idx, candidates.len());
             for c in candidates {
                 if !next.iter().any(|x| x.equals(&c)) {
                     next.push(c);
@@ -146,6 +151,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
             }
         }
         nodes = next;
+        log::debug!("[XPath step_through] Step {}: {} nodes after step", step_idx, nodes.len());
     }
     Ok(nodes)
 }
@@ -170,6 +176,7 @@ fn apply_predicate(nodes: &[UiElement], pred: &Expr, ctx: &Context) -> Result<Ve
         let sub = ctx.with_node(n.clone(), i + 1, size);
         // 处理属性谓词 @attr 和 @attr=...
         let v = eval_predicate(pred, &sub)?;
+        log::debug!("[apply_predicate] node {} {}: class='{}' predicate result={:?}", i, n.node_name(), n.class_name(), v);
         let keep = match v {
             Value::Number(num) => num as i64 == (i as i64 + 1),
             other => other.to_boolean(),

@@ -49,8 +49,14 @@ pub struct OptimizeResult {
     pub minimal: String,
     /// 被选为锚点的节点描述（调试用）
     pub anchor_desc: String,
+    /// 锚点节点索引（在原始节点列表中的位置）
+    pub anchor_index: Option<usize>,
+    /// 目标节点索引（在原始节点列表中的位置）
+    pub target_index: usize,
     /// 压缩率 0.0~1.0
     pub compression_ratio: f64,
+    /// 简化属性数量（使用 starts-with/ends-with/contains 的数量）
+    pub simplified_attrs_count: usize,
 }
 
 // ──────────────────────────────────────────────
@@ -116,12 +122,20 @@ pub fn optimize(xpath: &str, opts: &OptimizeOptions) -> Result<OptimizeResult> {
         .unwrap_or_else(|| "none".into());
 
     let compression_ratio = 1.0 - (anchor_relative.len() as f64 / xpath.len() as f64);
+    
+    // 统计简化属性数量（starts-with 的使用次数）
+    let simplified_attrs_count = anchor_relative.matches("starts-with").count()
+        + anchor_relative.matches("ends-with").count()
+        + anchor_relative.matches("contains").count();
 
     Ok(OptimizeResult {
         anchor_relative,
         minimal,
         anchor_desc,
+        anchor_index: anchor_idx,
+        target_index: target_idx,
         compression_ratio,
+        simplified_attrs_count,
     })
 }
 
@@ -305,7 +319,7 @@ fn anchor_score(node: &ParsedNode) -> u32 {
 }
 
 /// 根据 tag 名额外加分
-fn tag_uniqueness_bonus(tag: &str) -> u32 {
+pub fn tag_uniqueness_bonus(tag: &str) -> u32 {
     match tag {
         "Document" => 5,
         "Edit" | "Button" | "CheckBox" | "RadioButton" => 4,
@@ -322,7 +336,7 @@ fn tag_uniqueness_bonus(tag: &str) -> u32 {
 // ──────────────────────────────────────────────
 
 /// 判断 ControlType 是否属于泛型（不具备良好区分度）
-fn is_generic_control_type(ct: &str) -> bool {
+pub fn is_generic_control_type(ct: &str) -> bool {
     matches!(ct, "Pane" | "Group" | "Custom")
 }
 
@@ -333,7 +347,7 @@ fn is_generic_control_type(ct: &str) -> bool {
 /// 2. 任意 token 末尾有 4+ 位纯数字（如 `btn123456`）
 /// 3. 任意 token 含有 camelCase 突然夹杂大写+数字混合段（如 `BOp4`, `ZJ07f`, `wilLn`）
 /// 4. 任意 token 长度超过 25（通常是编译后的混淆名）
-fn is_dynamic_class(cn: &str) -> bool {
+pub fn is_dynamic_class(cn: &str) -> bool {
     let tokens: Vec<&str> = cn.split_whitespace().collect();
     // 规则 1：超过 2 个 token（三段以上组合类名几乎都是动态的）
     if tokens.len() > 2 {
@@ -383,7 +397,7 @@ fn camel_segment_is_random(s: &str) -> bool {
 
 /// 拆分 camelCase 为词列表，按大写字母边界分割
 /// 例如 "btnBOp4" -> ["btn", "BOp4"]，"MultiContentsView" -> ["Multi", "Contents", "View"]
-fn split_camel(s: &str) -> Vec<&str> {
+pub fn split_camel(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut starts: Vec<usize> = vec![0];
     for i in 1..bytes.len() {
@@ -419,7 +433,7 @@ fn is_random_word(w: &str) -> bool {
 /// 1. 取第一个空格分隔 token
 /// 2. 按连字符分割，对每个 part 用 camelCase 拆分找到稳定词
 /// 3. 遇到随机词立即截断，只保留之前的稳定部分
-fn extract_stable_prefix(cn: &str) -> String {
+pub fn extract_stable_prefix(cn: &str) -> String {
     let first_token = cn.split_whitespace().next().unwrap_or(cn);
 
     let mut result_parts: Vec<String> = Vec::new();

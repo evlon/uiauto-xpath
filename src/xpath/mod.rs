@@ -8,6 +8,17 @@ pub mod parser;
 pub mod value;
 pub mod optimizer;
 
+// 导出 optimizer 的核心算法函数供外部使用
+pub use optimizer::{
+    is_dynamic_class,
+    extract_stable_prefix,
+    tag_uniqueness_bonus,
+    is_generic_control_type,
+    split_camel,
+    OptimizeOptions,
+    OptimizeResult,
+};
+
 use crate::element::UiElement;
 use crate::error::Result;
 
