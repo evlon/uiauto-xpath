@@ -86,8 +86,8 @@ impl ParsedNode {
 /// 对完整 XPath 进行优化，返回简洁高效的等价表达式。
 ///
 /// # 示例
-/// ```
-/// use crate::{optimize, OptimizeOptions};
+/// ```ignore
+/// use uiauto_xpath::{optimize, OptimizeOptions};
 ///
 /// let full = r#"//Pane[@ControlType='Pane' and @ClassName='ChromeWidgetWin1']/...很长.../Group[@ClassName='temp-dialogue-btn...']"#;
 /// let result = optimize(full, &OptimizeOptions::default()).unwrap();
@@ -144,6 +144,7 @@ pub fn optimize(xpath: &str, opts: &OptimizeOptions) -> Result<OptimizeResult> {
 // ──────────────────────────────────────────────
 
 /// 策略一：// 跳过锚点前所有节点，从锚点相对定位到目标
+/// 特殊情况：锚点是第一个节点时，用 / 开头（绝对路径）
 fn build_anchor_relative(
     nodes: &[ParsedNode],
     anchor_idx: Option<usize>,
@@ -155,7 +156,35 @@ fn build_anchor_relative(
             // 没有好锚点，直接 // target
             format!("//{}", render_node(&nodes[target_idx], true, opts))
         }
+        Some(0) => {
+            // 锚点是第一个节点（根节点），用绝对路径 / 开头
+            let anchor_str = format!("/{}", render_node(&nodes[0], false, opts));
+            let target_str = render_node(&nodes[target_idx], true, opts);
+            
+            if target_idx == 0 {
+                // 目标就是锚点（根节点本身）
+                anchor_str
+            } else if target_idx == 1 {
+                // 目标是锚点的直接子节点
+                format!("{}/{}", anchor_str, target_str)
+            } else {
+                // 有中间节点
+                let mid_count = target_idx - 1;
+                if mid_count <= opts.max_intermediate_steps {
+                    let mid: String = nodes[1..target_idx]
+                        .iter()
+                        .map(|n| n.tag.clone())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    format!("{}/{}/{}", anchor_str, mid, target_str)
+                } else {
+                    // 中间节点多，用 // 跳过
+                    format!("{}//{}", anchor_str, target_str)
+                }
+            }
+        }
         Some(ai) => {
+            // 锚点不是第一个节点，用相对路径 // 开头（跳过锚点前的节点）
             let anchor_str = format!("//{}", render_node(&nodes[ai], false, opts));
             let mid_count = target_idx - ai - 1;
             let target_str = render_node(&nodes[target_idx], true, opts);
