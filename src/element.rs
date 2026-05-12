@@ -63,6 +63,24 @@ impl UiElement {
     pub fn framework_id(&self) -> String {
         unsafe { self.raw.CurrentFrameworkId().map(|s| s.to_string()).unwrap_or_default() }
     }
+    pub fn is_password(&self) -> bool {
+        unsafe { self.raw.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) }
+    }
+    pub fn accelerator_key(&self) -> String {
+        unsafe { self.raw.CurrentAcceleratorKey().map(|s| s.to_string()).unwrap_or_default() }
+    }
+    pub fn access_key(&self) -> String {
+        unsafe { self.raw.CurrentAccessKey().map(|s| s.to_string()).unwrap_or_default() }
+    }
+    pub fn item_type(&self) -> String {
+        unsafe { self.raw.CurrentItemType().map(|s| s.to_string()).unwrap_or_default() }
+    }
+    pub fn item_status(&self) -> String {
+        unsafe { self.raw.CurrentItemStatus().map(|s| s.to_string()).unwrap_or_default() }
+    }
+    pub fn localized_control_type(&self) -> String {
+        unsafe { self.raw.CurrentLocalizedControlType().map(|s| s.to_string()).unwrap_or_default() }
+    }
 
     /// 获取属性的字符串表示，用于 XPath 属性匹配 (@xxx)
     pub fn get_property(&self, name: &str) -> Option<String> {
@@ -79,6 +97,12 @@ impl UiElement {
             "processid" | "pid" => Some(self.process_id().to_string()),
             "helptext" => Some(self.help_text()),
             "frameworkid" => Some(self.framework_id()),
+            "ispassword" | "password" => Some(self.is_password().to_string()),
+            "acceleratorkey" => Some(self.accelerator_key()),
+            "accesskey" => Some(self.access_key()),
+            "itemtype" => Some(self.item_type()),
+            "itemstatus" => Some(self.item_status()),
+            "localizedcontroltype" => Some(self.localized_control_type()),
             _ => None,
         }
     }
