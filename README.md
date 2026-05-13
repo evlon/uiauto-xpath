@@ -179,6 +179,26 @@ temp-dialogue-btnBOp4
 - Windows 10/11
 - Rust 2021 Edition
 
+## 调试日志
+
+默认情况下，库只输出 `info` 级别及以上的日志。如果需要查看详细的 XPath 优化和 UIA Condition 构建过程，可以设置环境变量：
+
+```bash
+# 查看详细调试日志
+set RUST_LOG=uiauto_xpath=debug
+cargo run --bin element-selector
+
+# 或者在 Linux/macOS 上
+export RUST_LOG=uiauto_xpath=debug
+cargo run --bin element-selector
+```
+
+调试日志包括：
+- XPath 步骤优化决策（是否使用 FindAll）
+- UIA Condition 构建过程（属性映射、条件合并）
+- FindAll 返回的元素数量
+- 复杂谓词过滤结果
+
 ## License
 
 MIT
