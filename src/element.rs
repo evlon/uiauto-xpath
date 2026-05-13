@@ -1,6 +1,7 @@
 use crate::error::Result;
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
+    IUIAutomation, IUIAutomationCondition, IUIAutomationElement, IUIAutomationTreeWalker,
+    TreeScope_Children, TreeScope_Descendants,
 };
 
 #[derive(Clone)]
@@ -184,6 +185,66 @@ impl UiElement {
         unsafe {
             self.automation.CompareElements(&self.raw, &other.raw)
                 .map(|b| b.as_bool()).unwrap_or(false)
+        }
+    }
+
+    /// 使用 UIA FindAll 快速查找子元素（带条件过滤）
+    pub fn find_children_with_condition(
+        &self,
+        condition: &IUIAutomationCondition
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAll(TreeScope_Children, condition)?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
+        }
+    }
+    
+    /// 使用 UIA FindAll 快速查找后代元素（带条件过滤）
+    pub fn find_descendants_with_condition(
+        &self,
+        condition: &IUIAutomationCondition
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAll(TreeScope_Descendants, condition)?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
+        }
+    }
+    
+    /// 使用 UIA FindFirst 查找第一个匹配的子元素
+    pub fn find_first_child_with_condition(
+        &self,
+        condition: &IUIAutomationCondition
+    ) -> Result<Option<UiElement>> {
+        unsafe {
+            match self.raw.FindFirst(TreeScope_Children, condition) {
+                Ok(elem) => Ok(Some(UiElement::new(elem, self.automation.clone()))),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+    
+    /// 使用 UIA FindFirst 查找第一个匹配的后代元素
+    pub fn find_first_descendant_with_condition(
+        &self,
+        condition: &IUIAutomationCondition
+    ) -> Result<Option<UiElement>> {
+        unsafe {
+            match self.raw.FindFirst(TreeScope_Descendants, condition) {
+                Ok(elem) => Ok(Some(UiElement::new(elem, self.automation.clone()))),
+                Err(_) => Ok(None),
+            }
         }
     }
 }

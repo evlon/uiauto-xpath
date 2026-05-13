@@ -126,25 +126,117 @@ fn eval_path(p: &PathExpr, ctx: &Context) -> Result<Value> {
 fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Result<Vec<UiElement>> {
     log::debug!("[XPath step_through] Starting with {} nodes", nodes.len());
     for (step_idx, step) in steps.iter().enumerate() {
-        log::debug!("[XPath step_through] Step {}: axis={:?}, test={:?}, predicates={}", step_idx, step.axis, step.test, step.predicates.len());
+        log::debug!("[XPath step_through] Step {}: axis={:?}, test={:?}, predicates={}", 
+            step_idx, step.axis, step.test, step.predicates.len());
+        
         let mut next: Vec<UiElement> = Vec::new();
+        
+        // 分析谓词，决定是否使用 FindAll 优化
+        use crate::xpath::uia_condition;
+        let analysis = uia_condition::analyze_predicates(&step.predicates);
+        
+        let should_optimize = analysis.can_optimize 
+            && matches!(step.axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf)
+            && analysis.expected_benefit >= 0.5; // 至少 50% 的谓词可以用 Condition
+        
+        log::debug!("[XPath step_through] Step {} optimization: can_optimize={}, axis_ok={}, benefit={:.2}, should_optimize={}",
+            step_idx, analysis.can_optimize, 
+            matches!(step.axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf),
+            analysis.expected_benefit, should_optimize);
+        
         for n in &nodes {
-            let mut candidates = if step.axis == Axis::Attribute {
-                Vec::new() // UIA 中属性不是节点
+            let candidates = if should_optimize {
+                // ★ 两阶段过滤：先用 UIA Condition 快速筛选
+                match uia_condition::build_condition_from_analysis(
+                    &n.automation, 
+                    &step.predicates,
+                    &analysis
+                ) {
+                    Ok(condition) => {
+                        // 阶段 1：UIA 引擎过滤
+                        let filtered = match step.axis {
+                            Axis::Child => {
+                                match n.find_children_with_condition(&condition) {
+                                    Ok(elems) => {
+                                        log::debug!("[XPath step_through] FindAll(Children) returned {} elements", elems.len());
+                                        elems
+                                    },
+                                    Err(e) => {
+                                        log::warn!("[XPath step_through] FindAll failed: {:?}", e);
+                                        // 不使用回退，直接返回空
+                                        Vec::new()
+                                    }
+                                }
+                            },
+                            Axis::Descendant | Axis::DescendantOrSelf => {
+                                match n.find_descendants_with_condition(&condition) {
+                                    Ok(elems) => {
+                                        log::debug!("[XPath step_through] FindAll(Descendants) returned {} elements", elems.len());
+                                        elems
+                                    },
+                                    Err(e) => {
+                                        log::warn!("[XPath step_through] FindAll failed: {:?}", e);
+                                        Vec::new()
+                                    }
+                                }
+                            },
+                            _ => {
+                                // 不支持的轴，使用原有逻辑
+                                axes::select_axis(n, step.axis)?
+                            }
+                        };
+                        
+                        log::debug!("[XPath step_through] Step {}: {} after UIA filter", 
+                            step_idx, filtered.len());
+                        
+                        // 诊断：如果结果为空，输出详细信息
+                        if filtered.is_empty() && !step.predicates.is_empty() {
+                            uia_condition::diagnose_empty_result(
+                                n, step.axis, &step.predicates, &analysis
+                            );
+                        }
+                        
+                        // 阶段 2：Rust 层应用复杂谓词
+                        if !analysis.complex_indices.is_empty() {
+                            uia_condition::apply_complex_predicates(
+                                filtered, 
+                                &step.predicates, 
+                                &analysis.complex_indices,
+                                ctx
+                            )?
+                        } else {
+                            filtered
+                        }
+                    },
+                    Err(e) => {
+                        // Condition 构建失败，不使用回退，记录错误并跳过
+                        log::warn!("[XPath step_through] Condition build failed: {:?}", e);
+                        Vec::new()
+                    }
+                }
             } else {
-                axes::select_axis(n, step.axis)?
+                // 不优化的情况：使用原有 TreeWalker 遍历
+                if step.axis == Axis::Attribute {
+                    Vec::new()
+                } else {
+                    axes::select_axis(n, step.axis)?
+                }
             };
-            log::debug!("[XPath step_through] Step {}: {} candidates from axis", step_idx, candidates.len());
+            
+            log::debug!("[XPath step_through] Step {}: {} candidates from axis", 
+                step_idx, candidates.len());
+            
             // 节点测试
-            candidates.retain(|c| node_test_match(c, &step.test, step.axis));
-            log::debug!("[XPath step_through] Step {}: {} after node test", step_idx, candidates.len());
-
-            // predicate（按 step 的轴方向考虑 position）
-            for pred in &step.predicates {
-                candidates = apply_predicate(&candidates, pred, ctx)?;
-            }
-            log::debug!("[XPath step_through] Step {}: {} after predicates", step_idx, candidates.len());
+            let mut after_test: Vec<UiElement> = Vec::new();
             for c in candidates {
+                if node_test_match(&c, &step.test, step.axis) {
+                    after_test.push(c);
+                }
+            }
+            log::debug!("[XPath step_through] Step {}: {} after node test", step_idx, after_test.len());
+
+            // 去重
+            for c in after_test {
                 if !next.iter().any(|x| x.equals(&c)) {
                     next.push(c);
                 }
@@ -191,7 +283,8 @@ fn eval_predicate(expr: &Expr, ctx: &Context) -> Result<Value> {
     eval_with_attrs(expr, ctx)
 }
 
-fn eval_with_attrs(expr: &Expr, ctx: &Context) -> Result<Value> {
+// 导出供 uia_condition 模块使用
+pub fn eval_with_attrs(expr: &Expr, ctx: &Context) -> Result<Value> {
     // 对二元运算左右进行属性短路求值
     match expr {
         Expr::Path(p) if p.steps.len() == 1 && p.steps[0].axis == Axis::Attribute && !p.absolute => {

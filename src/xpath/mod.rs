@@ -7,6 +7,7 @@ pub mod lexer;
 pub mod parser;
 pub mod value;
 pub mod optimizer;
+pub mod uia_condition;
 
 // 导出 optimizer 的核心算法函数供外部使用
 pub use optimizer::{

@@ -28,10 +28,54 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
         "id" => {
             arity!(1);
             // 在 UIA 上下文中按 AutomationId 查找
-            let s = args[0].to_string_value();
-            let mut out = Vec::new();
-            collect_by_id(&ctx.root, &s, &mut out)?;
-            Value::NodeSet(out)
+            let id_str = args[0].to_string_value();
+            
+            // ★ 优化：直接使用 FindFirst 查找 AutomationId
+            use windows::Win32::UI::Accessibility::UIA_AutomationIdPropertyId;
+            use windows::Win32::System::Variant::VARIANT;
+            use windows::core::BSTR;
+            
+            unsafe {
+                let condition = ctx.node.automation.CreatePropertyCondition(
+                    UIA_AutomationIdPropertyId,
+                    &VARIANT::from(BSTR::from(id_str.as_str()))
+                );
+                
+                if let Ok(cond) = condition {
+                    // 先尝试在当前节点的子元素中查找
+                    match ctx.node.find_first_child_with_condition(&cond) {
+                        Ok(Some(elem)) => {
+                            log::debug!("[id()] Found element in children with AutomationId='{}'", id_str);
+                            return Ok(Value::NodeSet(vec![elem]));
+                        },
+                        Ok(None) => {
+                            log::debug!("[id()] Not found in children, trying descendants...");
+                        },
+                        Err(e) => {
+                            log::warn!("[id()] FindFirst on children failed: {:?}", e);
+                        }
+                    }
+                    
+                    // 再尝试在后代元素中查找
+                    match ctx.node.find_first_descendant_with_condition(&cond) {
+                        Ok(Some(elem)) => {
+                            log::debug!("[id()] Found element in descendants with AutomationId='{}'", id_str);
+                            return Ok(Value::NodeSet(vec![elem]));
+                        },
+                        Ok(None) => {
+                            log::debug!("[id()] No element found with AutomationId='{}'", id_str);
+                            return Ok(Value::NodeSet(vec![]));
+                        },
+                        Err(e) => {
+                            log::warn!("[id()] FindFirst on descendants failed: {:?}", e);
+                            return Ok(Value::NodeSet(vec![]));
+                        }
+                    }
+                } else {
+                    log::warn!("[id()] Failed to create condition for AutomationId='{}'", id_str);
+                    return Ok(Value::NodeSet(vec![]));
+                }
+            }
         }
         "local-name" | "name" => {
             arity!(0, 1);
@@ -184,14 +228,4 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
 
         _ => return Err(XPathError::UnknownFunction(name.into())),
     })
-}
-
-fn collect_by_id(node: &crate::element::UiElement, id: &str, out: &mut Vec<crate::element::UiElement>) -> Result<()> {
-    if node.automation_id() == id {
-        out.push(node.clone());
-    }
-    for c in node.children()? {
-        collect_by_id(&c, id, out)?;
-    }
-    Ok(())
 }
