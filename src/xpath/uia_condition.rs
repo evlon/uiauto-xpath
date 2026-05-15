@@ -322,11 +322,11 @@ pub fn diagnose_empty_result(
     predicates: &[Expr],
     analysis: &PredicateAnalysis
 ) {
-    warn!("[UIA Condition] FindAll returned empty result, diagnosing...");
-    warn!("  Node: {} class='{}' name='{}'", 
+    debug!("[UIA Condition] FindAll returned empty result, diagnosing...");
+    debug!("  Node: {} class='{}' name='{}'", 
         node.node_name(), node.class_name(), node.name());
-    warn!("  Axis: {:?}", axis);
-    warn!("  Predicates: {} total, {} simple, {} complex",
+    debug!("  Axis: {:?}", axis);
+    debug!("  Predicates: {} total, {} simple, {} complex",
         predicates.len(), analysis.simple_indices.len(), analysis.complex_indices.len());
     
     // 检查每个简单谓词对应的属性值
@@ -336,7 +336,7 @@ pub fn diagnose_empty_result(
                 if let NodeTest::Name(attr_name) = &p.steps[0].test {
                     if let Expr::String(expected_value) = value_expr.as_ref() {
                         let actual_value = node.get_property(attr_name).unwrap_or_default();
-                        warn!("  Predicate [{}]: @{} = '{}' (actual: '{}')",
+                        debug!("  Predicate [{}]: @{} = '{}' (actual: '{}')",
                             idx, attr_name, expected_value, actual_value);
                     }
                 }
@@ -346,12 +346,12 @@ pub fn diagnose_empty_result(
     
     // 建议：是否需要调整策略
     if analysis.simple_indices.len() == predicates.len() {
-        warn!("  Suggestion: All predicates are simple, but no match found.");
-        warn!("  Possible causes:");
-        warn!("    1. Wrong axis (should use Descendant instead of Child?)");
-        warn!("    2. Element doesn't exist in the tree");
-        warn!("    3. Property values changed dynamically");
+        debug!("  Suggestion: All predicates are simple, but no match found.");
+        debug!("  Possible causes:");
+        debug!("    1. Wrong axis (should use Descendant instead of Child?)");
+        debug!("    2. Element doesn't exist in the tree");
+        debug!("    3. Property values changed dynamically");
     } else {
-        warn!("  Suggestion: Complex predicates may be too restrictive.");
+        debug!("  Suggestion: Complex predicates may be too restrictive.");
     }
 }
