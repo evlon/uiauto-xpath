@@ -124,10 +124,42 @@ fn eval_path(p: &PathExpr, ctx: &Context) -> Result<Value> {
 }
 
 fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Result<Vec<UiElement>> {
-    log::debug!("[XPath step_through] Starting with {} nodes", nodes.len());
+    log::debug!("[XPath step_through] Starting with {} nodes, {} steps", nodes.len(), steps.len());
+    
+    // ★ 特殊优化：如果 Step 0 是 DescendantOrSelf + Node (无谓词)，且 Step 1 有谓词
+    // 则跳过 Step 0，直接在 Step 1 使用 FindAll(Descendants)
+    let skip_step_0 = steps.len() >= 2
+        && matches!(steps[0].axis, Axis::DescendantOrSelf)
+        && matches!(steps[0].test, NodeTest::Node)
+        && steps[0].predicates.is_empty()
+        && !steps[1].predicates.is_empty();
+    
+    if skip_step_0 {
+        log::info!("[XPath step_through] ★ Optimization: Skipping Step 0 (DescendantOrSelf/Node), merging with Step 1");
+    }
+    
     for (step_idx, step) in steps.iter().enumerate() {
-        log::debug!("[XPath step_through] Step {}: axis={:?}, test={:?}, predicates={}", 
-            step_idx, step.axis, step.test, step.predicates.len());
+        // 如果跳过了 Step 0，直接处理 Step 1
+        if skip_step_0 && step_idx == 0 {
+            log::debug!("[XPath step_through] Step 0: SKIPPED (merged with Step 1)");
+            continue;
+        }
+        
+        // 如果是 Step 1 且 Step 0 被跳过，使用 Descendants 轴而非 Child
+        let effective_axis = if skip_step_0 && step_idx == 1 {
+            log::debug!("[XPath step_through] Step {}: axis={:?} (effective: Descendants), predicates={}", 
+                step_idx, step.axis, step.predicates.len());
+            Axis::Descendant
+        } else {
+            log::debug!("[XPath step_through] Step {}: axis={:?}, test={:?}, predicates={}", 
+                step_idx, step.axis, step.test, step.predicates.len());
+            step.axis
+        };
+        
+        // 输出谓词详情（仅 debug 模式）
+        for (i, pred) in step.predicates.iter().enumerate() {
+            log::debug!("[XPath step_through]   Predicate {}: {:?}", i, pred);
+        }
         
         let mut next: Vec<UiElement> = Vec::new();
         
@@ -136,12 +168,12 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
         let analysis = uia_condition::analyze_predicates(&step.predicates);
         
         let should_optimize = analysis.can_optimize 
-            && matches!(step.axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf)
+            && matches!(effective_axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf)
             && analysis.expected_benefit >= 0.5; // 至少 50% 的谓词可以用 Condition
         
         log::debug!("[XPath step_through] Step {} optimization: can_optimize={}, axis_ok={}, benefit={:.2}, should_optimize={}",
             step_idx, analysis.can_optimize, 
-            matches!(step.axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf),
+            matches!(effective_axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf),
             analysis.expected_benefit, should_optimize);
         
         for n in &nodes {
@@ -154,7 +186,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                 ) {
                     Ok(condition) => {
                         // 阶段 1：UIA 引擎过滤
-                        let filtered = match step.axis {
+                        let filtered = match effective_axis {
                             Axis::Child => {
                                 match n.find_children_with_condition(&condition) {
                                     Ok(elems) => {
@@ -186,8 +218,8 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                             }
                         };
                         
-                        log::debug!("[XPath step_through] Step {}: {} after UIA filter", 
-                            step_idx, filtered.len());
+                        log::debug!("[XPath step_through] Step {}: {} after UIA filter (complex predicates: {})", 
+                            step_idx, filtered.len(), analysis.complex_indices.len());
                         
                         // 诊断：如果结果为空，输出详细信息
                         if filtered.is_empty() && !step.predicates.is_empty() {

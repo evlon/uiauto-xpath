@@ -33,15 +33,20 @@ pub fn analyze_predicates(predicates: &[Expr]) -> PredicateAnalysis {
         if !simple_conds.is_empty() {
             // 有简单条件，可以优化
             simple_indices.push(i);
+            log::debug!("[UIA Condition] Predicate {} has {} simple conditions", i, simple_conds.len());
         }
         
         if has_complex {
             // 包含复杂条件，需要二次过滤
             complex_indices.push(i);
+            log::debug!("[UIA Condition] Predicate {} has complex conditions", i);
         }
     }
     
     let can_optimize = !simple_indices.is_empty();
+    
+    log::debug!("[UIA Condition] Analysis result: simple={}, complex={}, can_optimize={}", 
+        simple_indices.len(), complex_indices.len(), can_optimize);
     
     // 计算预期收益：简单谓词越多，收益越高
     let expected_benefit = if predicates.is_empty() {
@@ -78,8 +83,18 @@ fn extract_conditions_from_expr(expr: &Expr) -> (Vec<&Expr>, bool) {
             let has_complex = left_complex || right_complex;
             (result, has_complex)
         },
-        // 其他情况（函数调用、比较运算符等），视为复杂条件
-        _ => (vec![], true),
+        // ★ 特殊处理：starts-with() 等函数调用
+        // 虽然不能直接用 UIA Condition，但应该允许其他简单条件使用 FindAll
+        Expr::FunctionCall { name, args: _ } => {
+            // 函数调用本身是复杂条件，但不阻止其他条件的优化
+            log::debug!("[UIA Condition] Detected function call (complex predicate): {}", name);
+            (vec![], true)
+        },
+        // 其他情况（比较运算符等），视为复杂条件
+        _ => {
+            log::debug!("[UIA Condition] Detected complex expression: {:?}", expr);
+            (vec![], true)
+        }
     }
 }
 
