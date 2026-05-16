@@ -268,17 +268,8 @@ fn select_attrs(node: &ParsedNode, is_target: bool, opts: &OptimizeOptions) -> V
         }
     }
 
-    // ControlType —— 对于非通用类型保留
-    if !opts.remove_redundant_control_type {
-        if let Some(ct) = node.get_attr("ControlType") {
-            parts.push(format!("@ControlType='{}'", ct));
-        }
-    } else if let Some(ct) = node.get_attr("ControlType") {
-        // 只有非通用类型才保留（Pane/Group 太泛）
-        if !is_generic_control_type(ct) {
-            parts.push(format!("@ControlType='{}'", ct));
-        }
-    }
+    // ControlType 已通过 XPath 标签名表达，不再添加谓词
+    // 完全移除 ControlType 谓词以避免冗余
 
     // ClassName —— 检测动态性
     if let Some(cn) = node.get_attr("ClassName") {
@@ -336,10 +327,8 @@ fn anchor_score(node: &ParsedNode) -> u32 {
         if !cn.is_empty() && !is_dynamic_class(cn) { score += 4; }
     }
 
-    // ControlType：非通用类型加分
-    if let Some(ct) = node.get_attr("ControlType") {
-        if !is_generic_control_type(ct) { score += 3; }
-    }
+    // ControlType 评分转移到 tag_uniqueness_bonus，此处不再单独评分
+    // 因为 ControlType 已通过标签名体现
 
     // Tag 本身的语义：Document/Edit/Button 等比 Pane/Group 更具唯一性
     score += tag_uniqueness_bonus(&node.tag);
@@ -689,14 +678,24 @@ mod tests {
         // 压缩率应大于 70%
         assert!(result.compression_ratio > 0.7,
             "compression_ratio={}", result.compression_ratio);
+        
+        // 验证优化后的 XPath 不包含 @ControlType 谓词
+        assert!(!result.anchor_relative.contains("@ControlType="),
+            "Optimized XPath should not contain @ControlType predicates, got: {}", result.anchor_relative);
+        assert!(!result.minimal.contains("@ControlType="),
+            "Minimal XPath should not contain @ControlType predicates, got: {}", result.minimal);
     }
 
     #[test]
     fn test_no_anchor() {
         // 只有两个节点，都是通用 Pane
-        let simple = "//Pane[@ControlType='Pane']/Pane[@ControlType='Pane' and @ClassName='Target']";
+        let simple = "//Pane/Pane[@ClassName='Target']";
         let result = optimize(simple, &OptimizeOptions::default()).unwrap();
         println!("simple result: {}", result.anchor_relative);
         // 应该能正常输出，不 panic
+        
+        // 验证不包含 @ControlType
+        assert!(!result.anchor_relative.contains("@ControlType="),
+            "Should not contain @ControlType predicate");
     }
 }
