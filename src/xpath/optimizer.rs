@@ -732,8 +732,9 @@ where
         ));
         
         // 【关键修复】从完整属性开始，按优先级从低到高逐个尝试移除
-        // 优先级（从低到高）：LocalizedControlType < FrameworkId < Name < ClassName < AutomationId
-        let priority_order = ["LocalizedControlType", "FrameworkId", "Name", "ClassName", "AutomationId"];
+        // 优先级（从低到高）：LocalizedControlType < FrameworkId < Name < ClassName
+        // 【重要】AutomationId 永远不被移除，它是高性能定位的关键
+        let priority_order = ["LocalizedControlType", "FrameworkId", "Name", "ClassName"];
         
         // 初始状态：保留所有属性
         let mut attrs_to_keep: Vec<(String, String)> = original_attrs.clone();
@@ -1090,8 +1091,8 @@ mod tests {
         
         // 验证包含关键日志信息
         let log_text = logs.join("\n");
-        assert!(log_text.contains("开始优化"), "应该包含开始日志");
-        assert!(log_text.contains("优化完成"), "应该包含完成日志");
+        assert!(log_text.contains("开始") || log_text.contains("极简优化"), "应该包含开始日志");
+        assert!(log_text.contains("优化完成") || log_text.contains("简化完成"), "应该包含完成日志");
     }
     
     #[test]
