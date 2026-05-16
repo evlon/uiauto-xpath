@@ -680,7 +680,7 @@ where
     use std::time::Instant;
     let total_start = Instant::now();
     
-    progress_callback("[极简优化] 开始优化...");
+    progress_callback("[极简优化] 开始智能简化 XPath...");
     
     // 1. 解析 XPath 为节点列表
     let nodes = parse_xpath(xpath)?;
@@ -689,7 +689,18 @@ where
     }
     
     let target_idx = nodes.len() - 1;
-    progress_callback(&format!("[极简优化] 解析完成，共 {} 个节点", nodes.len()));
+    progress_callback(&format!("[极简优化] 分析 {} 个节点...", nodes.len()));
+    
+    // 【调试】打印解析后的节点信息
+    for (i, node) in nodes.iter().enumerate() {
+        progress_callback(&format!(
+            "  [{}] {} - {} 个属性: {:?}",
+            i,
+            node.tag,
+            node.attrs.len(),
+            node.attrs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()
+        ));
+    }
     
     // 【关键修复】直接从原始 XPath 的节点开始，而不是从标准优化结果开始
     // 因为标准优化可能已经移除了必要的属性
@@ -714,11 +725,10 @@ where
         let attr_count = original_attrs.len();
         
         progress_callback(&format!(
-            "\n[极简优化] 处理节点 {}/{}: {} ({} 个属性)",
+            "\n[极简优化] 处理第 {}/{} 个节点: {}",
             node_idx + 1,
             optimized_nodes.len(),
-            node_tag,
-            attr_count
+            node_tag
         ));
         
         // 【关键修复】从完整属性开始，按优先级从低到高逐个尝试移除
@@ -772,9 +782,9 @@ where
                 break;
             }
             
-            let attempt_start = Instant::now();
-            let attr_display = if attr_value.len() > 30 {
-                format!("{}...", &attr_value[..30])
+            // let attempt_start = Instant::now();  // 不再显示耗时
+            let attr_display = if attr_value.chars().count() > 30 {
+                format!("{}...", attr_value.chars().take(30).collect::<String>())
             } else {
                 attr_value.clone()
             };
@@ -788,24 +798,22 @@ where
             ));
             
             let verified = verify_callback(&test_xpath)?;
-            let elapsed = attempt_start.elapsed();
+            // let elapsed = attempt_start.elapsed();  // 不再显示耗时
             
             if verified {
                 // 验证成功（移除后仍能唯一定位），永久移除该属性
                 attrs_to_keep = test_attrs;
                 removed_count += 1;
                 progress_callback(&format!(
-                    "  ✓ 移除 @{} (移除后仍唯一，耗时 {:.0}ms)",
-                    attr_name_actual,
-                    elapsed.as_millis()
+                    "  ✓ 移除 {} (简化成功)",
+                    attr_name_actual
                 ));
             } else {
                 // 验证失败（移除后不唯一或找不到），保留该属性
                 kept_count += 1;
                 progress_callback(&format!(
-                    "  ✗ 保留 @{} (移除后无法唯一定位，耗时 {:.0}ms)",
-                    attr_name_actual,
-                    elapsed.as_millis()
+                    "  ✗ 保留 {} (必需属性)",
+                    attr_name_actual
                 ));
             }
         }  // for attr_name loop
@@ -813,12 +821,18 @@ where
         // 更新节点属性
         let final_attr_count = attrs_to_keep.len();
         
-        progress_callback(&format!(
-            "  → 节点 {} 最终保留 {} 个属性 (移除 {} 个)",
-            node_tag,
-            final_attr_count,
-            attr_count - final_attr_count
-        ));
+        if attr_count > final_attr_count {
+            progress_callback(&format!(
+                "  → {} 简化完成：移除 {} 个冗余属性",
+                node_tag,
+                attr_count - final_attr_count
+            ));
+        } else {
+            progress_callback(&format!(
+                "  → {} 所有属性均为必需，无法进一步简化",
+                node_tag
+            ));
+        }
         
         optimized_nodes[node_idx].attrs = attrs_to_keep;
     }
@@ -828,27 +842,24 @@ where
     let total_elapsed = total_start.elapsed();
     
     progress_callback(&format!(
-        "\n[极简优化] 优化完成！总耗时: {:.1}s",
+        "\n[极简优化] 优化完成！总耗时: {:.1}秒",
         total_elapsed.as_secs_f64()
     ));
     progress_callback(&format!(
-        "  - 总尝试次数: {}",
+        "  - 共尝试 {} 次属性移除",
         attempts
     ));
     progress_callback(&format!(
-        "  - 保留属性: {} 个",
-        kept_count
-    ));
-    progress_callback(&format!(
-        "  - 移除属性: {} 个",
+        "  - 成功简化 {} 个属性",
         removed_count
     ));
     progress_callback(&format!(
-        "  - 原始长度: {} 字符",
-        xpath.len()
+        "  - 保留 {} 个必需属性",
+        kept_count
     ));
     progress_callback(&format!(
-        "  - 优化后长度: {} 字符 (压缩率: {:.1}%)",
+        "  - XPath 长度: {} → {} 字符 (压缩 {:.0}%)",
+        xpath.len(),
         final_xpath.len(),
         (1.0 - final_xpath.len() as f64 / xpath.len() as f64) * 100.0
     ));
