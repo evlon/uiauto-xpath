@@ -18,6 +18,7 @@ pub use optimizer::{
     split_camel,
     OptimizeOptions,
     OptimizeResult,
+    optimize_minimal_with_cancel,
 };
 
 use crate::element::UiElement;
@@ -56,5 +57,20 @@ impl XPath {
     // src/xpath/mod.rs
     pub fn optimize(xpath: &str) -> Result<optimizer::OptimizeResult> {
         optimizer::optimize(xpath, &optimizer::OptimizeOptions::default())
+    }
+    
+    /// 极简优化：通过尝试验证移除所有非必要属性
+    pub fn optimize_minimal<F, P>(
+        xpath: &str,
+        verify_callback: F,
+        progress_callback: P,
+    ) -> Result<Option<String>>
+    where
+        F: Fn(&str) -> Result<bool>,
+        P: Fn(&str),
+    {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        optimize_minimal_with_cancel(xpath, verify_callback, progress_callback, cancel_flag)
     }
 }

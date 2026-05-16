@@ -557,12 +557,58 @@ fn parse_step_str(s: &str) -> Result<ParsedNode> {
 
 /// 解析谓词块 `[@a='v' and @b='v2' and ...]`，提取所有 `@key='value'` 对
 ///
-/// 只处理简单的 `@attr='value'` 形式（等号赋值），
-/// 不解析 contains/starts-with 等函数（优化器本身会生成它们）。
+/// 【关键修复】同时处理 starts-with(@ClassName, 'value') 函数调用
 fn parse_predicates(s: &str) -> Result<Vec<(String, String)>> {
     let mut attrs = Vec::new();
 
-    // 用正则-style 手工扫描：找所有 @key='value' 或 @key="value"
+    // 【关键修复】先查找 starts-with 函数调用
+    let mut search_start = 0;
+    while let Some(pos) = s[search_start..].find("starts-with(") {
+        let func_pos = search_start + pos;
+        
+        // 找到对应的右括号
+        let paren_start = func_pos + "starts-with(".len();
+        let mut depth = 1;
+        let mut i = paren_start;
+        let bytes = s.as_bytes();
+        
+        while i < s.len() && depth > 0 {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        
+        if depth == 0 {
+            let func_content = &s[paren_start..i-1];
+            
+            // 解析 starts-with(@ClassName, 'value')
+            // 格式：@ClassName, 'value'
+            let parts: Vec<&str> = func_content.split(',').collect();
+            if parts.len() >= 2 {
+                let attr_part = parts[0].trim();
+                let value_part = parts[1].trim();
+                
+                // 提取属性名（去掉 @）
+                if attr_part.starts_with('@') {
+                    let attr_name = &attr_part[1..];
+                    
+                    // 提取值（去掉引号）
+                    let value = value_part.trim_matches(|c| c == '\'' || c == '"');
+                    
+                    attrs.push((format!("__starts_with__{}", attr_name), value.to_string()));
+                }
+            }
+            
+            search_start = i;
+        } else {
+            break;
+        }
+    }
+
+    // 然后查找简单的 @key='value' 模式
     let mut i = 0;
     let bytes = s.as_bytes();
     let len = s.len();
@@ -601,6 +647,291 @@ fn parse_predicates(s: &str) -> Result<Vec<(String, String)>> {
     }
 
     Ok(attrs)
+}
+
+// ──────────────────────────────────────────────
+// 极简优化（带取消支持）
+// ──────────────────────────────────────────────
+
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+/// 极简优化：通过尝试验证移除所有非必要属性
+/// 
+/// # 参数
+/// - `xpath`: 原始 XPath 字符串
+/// - `verify_callback`: 验证回调函数，接收简化后的 XPath，返回是否找到元素
+///   - 签名：`Fn(&str) -> Result<bool>`
+///   - 返回 Ok(true) 表示该 XPath 能定位到元素
+///   - 返回 Err 表示验证失败或用户取消
+/// - `progress_callback`: 进度回调函数，用于输出日志
+///   - 签名：`Fn(&str)`
+///   - 每次尝试验证时调用，输出当前状态
+/// - `cancel_flag`: 取消标志，设置为 true 时中断优化
+pub fn optimize_minimal_with_cancel<F, P>(
+    xpath: &str, 
+    verify_callback: F,
+    progress_callback: P,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<Option<String>>
+where
+    F: Fn(&str) -> Result<bool>,
+    P: Fn(&str),
+{
+    use std::time::Instant;
+    let total_start = Instant::now();
+    
+    progress_callback("[极简优化] 开始优化...");
+    
+    // 1. 解析 XPath 为节点列表
+    let nodes = parse_xpath(xpath)?;
+    if nodes.is_empty() {
+        return Err(XPathError::ParseError("empty xpath".into()));
+    }
+    
+    let target_idx = nodes.len() - 1;
+    progress_callback(&format!("[极简优化] 解析完成，共 {} 个节点", nodes.len()));
+    
+    // 【关键修复】直接从原始 XPath 的节点开始，而不是从标准优化结果开始
+    // 因为标准优化可能已经移除了必要的属性
+    let mut optimized_nodes = nodes.clone();
+    progress_callback(&format!("[极简优化] 原始 XPath 长度: {} 字符", xpath.len()));
+    
+    // 3. 对每个节点的每个属性进行尝试移除
+    let mut attempts = 0;
+    let max_attempts = 50;
+    let mut removed_count = 0;
+    let mut kept_count = 0;
+    
+    for node_idx in 0..optimized_nodes.len() {
+        // 检查取消标志
+        if cancel_flag.load(Ordering::SeqCst) {
+            progress_callback("[极简优化] 检测到取消信号，停止优化");
+            return Ok(None);
+        }
+        
+        let node_tag = &optimized_nodes[node_idx].tag;
+        let original_attrs = optimized_nodes[node_idx].attrs.clone();
+        let attr_count = original_attrs.len();
+        
+        progress_callback(&format!(
+            "\n[极简优化] 处理节点 {}/{}: {} ({} 个属性)",
+            node_idx + 1,
+            optimized_nodes.len(),
+            node_tag,
+            attr_count
+        ));
+        
+        // 【关键修复】从完整属性开始，按优先级从低到高逐个尝试移除
+        // 优先级（从低到高）：LocalizedControlType < FrameworkId < Name < ClassName < AutomationId
+        let priority_order = ["LocalizedControlType", "FrameworkId", "Name", "ClassName", "AutomationId"];
+        
+        // 初始状态：保留所有属性
+        let mut attrs_to_keep: Vec<(String, String)> = original_attrs.clone();
+        
+        for attr_name in &priority_order {
+            // 检查取消标志
+            if cancel_flag.load(Ordering::SeqCst) {
+                progress_callback("[极简优化] 检测到取消信号，停止优化");
+                return Ok(None);
+            }
+            
+            // 【关键修复】同时检查普通属性和 __starts_with__ 前缀的属性
+            let attr_pos = attrs_to_keep.iter()
+                .position(|(k, _)| {
+                    k.eq_ignore_ascii_case(attr_name) || 
+                    k.eq_ignore_ascii_case(&format!("__starts_with__{}", attr_name))
+                });
+            
+            if attr_pos.is_none() {
+                // 已经没有这个属性了，跳过
+                continue;
+            }
+            
+            let attr_pos = attr_pos.unwrap();
+            let (attr_name_actual, attr_value) = attrs_to_keep[attr_pos].clone();
+            
+            // 【关键修复】尝试移除这个属性
+            let mut test_attrs = attrs_to_keep.clone();
+            test_attrs.remove(attr_pos);  // 移除该属性
+            
+            // 构建测试 XPath
+            let test_node = ParsedNode {
+                tag: optimized_nodes[node_idx].tag.clone(),
+                attrs: test_attrs.clone(),
+            };
+            
+            let test_xpath = build_test_xpath(&optimized_nodes, node_idx, &test_node);
+            
+            // 尝试验证
+            attempts += 1;
+            if attempts > max_attempts {
+                progress_callback(&format!(
+                    "  ⚠ 达到最大尝试次数 ({})，停止优化",
+                    max_attempts
+                ));
+                break;
+            }
+            
+            let attempt_start = Instant::now();
+            let attr_display = if attr_value.len() > 30 {
+                format!("{}...", &attr_value[..30])
+            } else {
+                attr_value.clone()
+            };
+            
+            progress_callback(&format!(
+                "  [尝试 {}/{}] 测试移除 @{}='{}'...",
+                attempts,
+                max_attempts,
+                attr_name_actual,
+                attr_display
+            ));
+            
+            let verified = verify_callback(&test_xpath)?;
+            let elapsed = attempt_start.elapsed();
+            
+            if verified {
+                // 验证成功（移除后仍能唯一定位），永久移除该属性
+                attrs_to_keep = test_attrs;
+                removed_count += 1;
+                progress_callback(&format!(
+                    "  ✓ 移除 @{} (移除后仍唯一，耗时 {:.0}ms)",
+                    attr_name_actual,
+                    elapsed.as_millis()
+                ));
+            } else {
+                // 验证失败（移除后不唯一或找不到），保留该属性
+                kept_count += 1;
+                progress_callback(&format!(
+                    "  ✗ 保留 @{} (移除后无法唯一定位，耗时 {:.0}ms)",
+                    attr_name_actual,
+                    elapsed.as_millis()
+                ));
+            }
+        }  // for attr_name loop
+        
+        // 更新节点属性
+        let final_attr_count = attrs_to_keep.len();
+        
+        progress_callback(&format!(
+            "  → 节点 {} 最终保留 {} 个属性 (移除 {} 个)",
+            node_tag,
+            final_attr_count,
+            attr_count - final_attr_count
+        ));
+        
+        optimized_nodes[node_idx].attrs = attrs_to_keep;
+    }
+    
+    // 4. 重新构建最终 XPath
+    let final_xpath = rebuild_xpath_from_nodes(&optimized_nodes, target_idx);
+    let total_elapsed = total_start.elapsed();
+    
+    progress_callback(&format!(
+        "\n[极简优化] 优化完成！总耗时: {:.1}s",
+        total_elapsed.as_secs_f64()
+    ));
+    progress_callback(&format!(
+        "  - 总尝试次数: {}",
+        attempts
+    ));
+    progress_callback(&format!(
+        "  - 保留属性: {} 个",
+        kept_count
+    ));
+    progress_callback(&format!(
+        "  - 移除属性: {} 个",
+        removed_count
+    ));
+    progress_callback(&format!(
+        "  - 原始长度: {} 字符",
+        xpath.len()
+    ));
+    progress_callback(&format!(
+        "  - 优化后长度: {} 字符 (压缩率: {:.1}%)",
+        final_xpath.len(),
+        (1.0 - final_xpath.len() as f64 / xpath.len() as f64) * 100.0
+    ));
+    progress_callback(&format!(
+        "  - 最终 XPath: {}",
+        if final_xpath.len() > 100 {
+            format!("{}...", &final_xpath[..100])
+        } else {
+            final_xpath.clone()
+        }
+    ));
+    
+    Ok(Some(final_xpath))
+}
+
+/// 构建测试用 XPath（只修改指定节点的属性）
+fn build_test_xpath(
+    nodes: &[ParsedNode],
+    modified_idx: usize,
+    modified_node: &ParsedNode,
+) -> String {
+    // 【关键修复】直接根据节点的实际属性构建 XPath，不使用 render_node/select_attrs
+    // 因为 select_attrs 会根据优化选项过滤掉某些属性
+    
+    let prefix = if modified_idx == 0 { "/" } else { "//" };
+    
+    let parts: Vec<String> = nodes.iter().enumerate().map(|(i, node)| {
+        let current_node = if i == modified_idx { modified_node } else { node };
+        
+        // 直接构建谓词，使用节点中的所有属性
+        let mut predicates: Vec<String> = Vec::new();
+        for (key, value) in &current_node.attrs {
+            // 【关键修复】处理 starts-with 特殊标记
+            if key.starts_with("__starts_with__") {
+                let attr_name = &key["__starts_with__".len()..];
+                predicates.push(format!("starts-with(@{}, '{}')", attr_name, value));
+            } else {
+                predicates.push(format!("@{}='{}'", key, value));
+            }
+        }
+        
+        let pred_str = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("[{}]", predicates.join(" and "))
+        };
+        
+        format!("{}{}", current_node.tag, pred_str)
+    }).collect();
+    
+    // 使用 / 连接各个节点
+    format!("{}{}", prefix, parts.join("/"))
+}
+
+/// 从节点列表重建 XPath
+fn rebuild_xpath_from_nodes(nodes: &[ParsedNode], target_idx: usize) -> String {
+    // 【关键修复】直接使用节点中的属性，不经过 select_attrs 过滤
+    let prefix = if nodes.len() > 1 && target_idx > 0 { "//" } else { "/" };
+    
+    let parts: Vec<String> = nodes.iter().map(|node| {
+        // 直接构建谓词，使用节点中的所有属性
+        let mut predicates: Vec<String> = Vec::new();
+        for (key, value) in &node.attrs {
+            // 【关键修复】处理 starts-with 特殊标记
+            if key.starts_with("__starts_with__") {
+                let attr_name = &key["__starts_with__".len()..];
+                predicates.push(format!("starts-with(@{}, '{}')", attr_name, value));
+            } else {
+                predicates.push(format!("@{}='{}'", key, value));
+            }
+        }
+        
+        let pred_str = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("[{}]", predicates.join(" and "))
+        };
+        
+        format!("{}{}", node.tag, pred_str)
+    }).collect();
+    
+    // 使用 / 连接各个节点
+    format!("{}{}", prefix, parts.join("/"))
 }
 
 // ──────────────────────────────────────────────
@@ -697,5 +1028,362 @@ mod tests {
         // 验证不包含 @ControlType
         assert!(!result.anchor_relative.contains("@ControlType="),
             "Should not contain @ControlType predicate");
+    }
+    
+    // ──────────────────────────────────────────────
+    // 极简优化测试
+    // ──────────────────────────────────────────────
+    
+    #[test]
+    fn test_optimize_minimal_basic() {
+        // 测试基本的极简优化功能
+        let xpath = "//Document[@AutomationId='RootWebArea' and @FrameworkId='Chrome']/Group[@FrameworkId='Chrome']";
+        
+        // 模拟验证回调：总是返回 true（简化测试）
+        let verify_callback = |_xpath: &str| -> Result<bool> {
+            Ok(true)
+        };
+        
+        let progress_logs: std::sync::Arc<std::sync::Mutex<Vec<String>>> = 
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_logs_clone = progress_logs.clone();
+        
+        let progress_callback = move |msg: &str| {
+            progress_logs_clone.lock().unwrap().push(msg.to_string());
+        };
+        
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        assert!(result.is_some(), "优化应该成功返回结果");
+        let optimized = result.unwrap();
+        
+        println!("原始 XPath: {}", xpath);
+        println!("优化后 XPath: {}", optimized);
+        
+        let logs = progress_logs.lock().unwrap();
+        println!("日志条数: {}", logs.len());
+        
+        // 验证优化后的 XPath 更短
+        assert!(optimized.len() <= xpath.len(), 
+            "优化后的 XPath 应该更短或相等");
+        
+        // 验证有进度日志输出
+        assert!(!logs.is_empty(), "应该有进度日志");
+        
+        // 验证包含关键日志信息
+        let log_text = logs.join("\n");
+        assert!(log_text.contains("开始优化"), "应该包含开始日志");
+        assert!(log_text.contains("优化完成"), "应该包含完成日志");
+    }
+    
+    #[test]
+    fn test_optimize_minimal_with_cancellation() {
+        // 测试取消功能
+        let xpath = "//Document[@AutomationId='RootWebArea' and @FrameworkId='Chrome']";
+        
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_clone = cancel_flag.clone();
+        
+        // 使用 AtomicUsize 来计数尝试次数（线程安全）
+        let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        
+        // 在第一次尝试验证后设置取消标志
+        let verify_callback = move |_xpath: &str| -> Result<bool> {
+            attempt_count_clone.fetch_add(1, Ordering::SeqCst);
+            if attempt_count_clone.load(Ordering::SeqCst) >= 1 {
+                cancel_flag_clone.store(true, Ordering::SeqCst);
+            }
+            Ok(true)
+        };
+        
+        let progress_callback = |_msg: &str| {};
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        // 取消后应该返回 None
+        assert!(result.is_none(), "取消后应该返回 None");
+    }
+    
+    #[test]
+    fn test_optimize_minimal_selective_removal() {
+        // 测试选择性移除：某些属性保留，某些移除
+        let xpath = "//Document[@AutomationId='RootWebArea' and @FrameworkId='Chrome' and @LocalizedControlType='文档']";
+        
+        // 模拟验证：只保留 AutomationId 就能定位
+        let verify_callback = |xpath: &str| -> Result<bool> {
+            // 如果 XPath 包含 AutomationId，就认为可以定位
+            Ok(xpath.contains("AutomationId='RootWebArea'"))
+        };
+        
+        let progress_logs: std::sync::Arc<std::sync::Mutex<Vec<String>>> = 
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_logs_clone = progress_logs.clone();
+        
+        let progress_callback = move |msg: &str| {
+            progress_logs_clone.lock().unwrap().push(msg.to_string());
+        };
+        
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        assert!(result.is_some(), "优化应该成功");
+        let optimized = result.unwrap();
+        
+        println!("原始 XPath: {}", xpath);
+        println!("优化后 XPath: {}", optimized);
+        
+        // 验证 AutomationId 被保留
+        assert!(optimized.contains("AutomationId='RootWebArea'"),
+            "AutomationId 应该被保留");
+        
+        // 验证 FrameworkId 和 LocalizedControlType 被移除
+        assert!(!optimized.contains("@FrameworkId"),
+            "FrameworkId 应该被移除");
+        assert!(!optimized.contains("@LocalizedControlType"),
+            "LocalizedControlType 应该被移除");
+        
+        // 验证 XPath 显著缩短
+        let compression = (1.0 - optimized.len() as f64 / xpath.len() as f64) * 100.0;
+        println!("压缩率: {:.1}%", compression);
+        assert!(compression > 30.0, "压缩率应该大于 30%");
+    }
+    
+    #[test]
+    fn test_optimize_minimal_complex_xpath() {
+        // 测试复杂的 XPath（类似用户提供的示例）
+        let xpath = "//Document[@AutomationId='RootWebArea' and @FrameworkId='Chrome' and @LocalizedControlType='文档']/Group[@FrameworkId='Chrome' and @LocalizedControlType='组']/Group[starts-with(@ClassName, 'chat_mainPage__wilLn') and @FrameworkId='Chrome' and @LocalizedControlType='组']/Group[starts-with(@ClassName, 'temp-dialogue-btn_temp-dialogue') and @FrameworkId='Chrome' and @LocalizedControlType='组']";
+        
+        // 模拟验证：只要保留 AutomationId 和 ClassName 的前缀匹配即可
+        let verify_callback = |xpath: &str| -> Result<bool> {
+            let has_automation_id = xpath.contains("AutomationId='RootWebArea'");
+            let has_class_prefix = xpath.contains("starts-with(@ClassName, 'chat_mainPage__wilLn')") ||
+                                   xpath.contains("starts-with(@ClassName, 'temp-dialogue-btn_temp-dialogue')");
+            Ok(has_automation_id || has_class_prefix)
+        };
+        
+        let progress_logs: std::sync::Arc<std::sync::Mutex<Vec<String>>> = 
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_logs_clone = progress_logs.clone();
+        
+        let progress_callback = move |msg: &str| {
+            progress_logs_clone.lock().unwrap().push(msg.to_string());
+        };
+        
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        assert!(result.is_some(), "复杂 XPath 优化应该成功");
+        let optimized = result.unwrap();
+        
+        println!("原始 XPath 长度: {}", xpath.len());
+        println!("优化后 XPath 长度: {}", optimized.len());
+        
+        let logs = progress_logs.lock().unwrap();
+        println!("日志条数: {}", logs.len());
+        
+        // 显示前几条和后几条日志
+        for (i, log) in logs.iter().enumerate() {
+            if i < 5 || i >= logs.len() - 5 {
+                println!("  [{}] {}", i, log);
+            } else if i == 5 {
+                println!("  ... ({} more logs)", logs.len() - 10);
+            }
+        }
+        
+        // 验证优化效果
+        let compression = (1.0 - optimized.len() as f64 / xpath.len() as f64) * 100.0;
+        println!("压缩率: {:.1}%", compression);
+        
+        // 验证 FrameworkId 和 LocalizedControlType 被大量移除
+        let framework_count = optimized.matches("@FrameworkId").count();
+        let localized_count = optimized.matches("@LocalizedControlType").count();
+        println!("FrameworkId 出现次数: {}", framework_count);
+        println!("LocalizedControlType 出现次数: {}", localized_count);
+        
+        // 原始 XPath 中有 4 个 FrameworkId 和 4 个 LocalizedControlType
+        // 优化后应该显著减少
+        assert!(framework_count < 4, "FrameworkId 应该被部分或全部移除");
+        assert!(localized_count < 4, "LocalizedControlType 应该被部分或全部移除");
+    }
+    
+    #[test]
+    fn test_optimize_minimal_real_scenario() {
+        // 【关键测试】使用用户真实捕获的 XPath
+        let xpath = "//Document[@AutomationId='RootWebArea' and @FrameworkId='Chrome' and @LocalizedControlType='文档']/Group[@FrameworkId='Chrome' and @LocalizedControlType='组']/Group[starts-with(@ClassName, 'chat_mainPage__wilLn') and @FrameworkId='Chrome' and @LocalizedControlType='组']/Group[starts-with(@ClassName, 'temp-dialogue-btn_temp-dialogue') and @FrameworkId='Chrome' and @LocalizedControlType='组']";
+        
+        println!("\n=== 真实场景测试 ===");
+        println!("原始 XPath: {}", xpath);
+        println!("原始长度: {} 字符\n", xpath.len());
+        
+        // 先解析看看节点的实际属性
+        let nodes = parse_xpath(xpath).unwrap();
+        println!("解析后的节点：");
+        for (i, node) in nodes.iter().enumerate() {
+            println!("  [{}] {} - 属性数: {}", i, node.tag, node.attrs.len());
+            for (k, v) in &node.attrs {
+                println!("      @{} = '{}'", k, if v.len() > 60 { format!("{}...", &v[..60]) } else { v.clone() });
+            }
+        }
+        println!();
+        
+        // 模拟真实验证逻辑（基于用户手动优化结果）：
+        // - 如果 XPath 包含 AutomationId + **最后一个 Group** 有 starts-with(@ClassName, 'temp-dialogue-btn_temp-dialogue') + @FrameworkId='Chrome'
+        //   且**中间节点不能有多余的 ClassName**（否则路径会太长） → 唯一
+        // - 其他情况 → 不唯一或找不到
+        let verify_callback = |test_xpath: &str| -> Result<bool> {
+            let has_automation_id = test_xpath.contains("AutomationId='RootWebArea'");
+            
+            // 【关键】检查最后一个 Group 是否有目标 ClassName
+            let parts: Vec<&str> = test_xpath.split('/').collect();
+            let has_target_class_in_last_group = if let Some(last) = parts.last() {
+                last.contains("starts-with(@ClassName, 'temp-dialogue-btn_temp-dialogue')")
+            } else {
+                false
+            };
+            
+            // 检查最后一个 Group 是否有 FrameworkId
+            let has_framework_in_last_group = if let Some(last) = parts.last() {
+                last.contains("@FrameworkId='Chrome'")
+            } else {
+                false
+            };
+            
+            // 【关键修复】检查中间节点（第2、3个 Group）是否有多余的 ClassName
+            // 如果有，说明路径不够简洁，不应该认为是唯一的
+            let has_extra_classname = parts.iter().enumerate().any(|(i, part)| {
+                // 跳过第一个（Document）和最后一个（目标 Group）
+                i > 0 && i < parts.len() - 1 && part.contains("@ClassName=")
+            });
+            
+            // 模拟：需要 AutomationId + 最后一个 Group 的目标 ClassName + 最后一个 Group 的 FrameworkId
+            //       且中间节点没有多余的 ClassName
+            let is_unique = has_automation_id && has_target_class_in_last_group && has_framework_in_last_group && !has_extra_classname;
+            
+            if is_unique {
+                println!("  [验证] ✓ 唯一匹配");
+            } else {
+                if has_extra_classname {
+                    println!("  [验证] ✗ 中间节点有多余的 ClassName");
+                } else {
+                    println!("  [验证] ✗ 不唯一或缺少必要属性");
+                }
+            }
+            
+            Ok(is_unique)
+        };
+        
+        let progress_logs: std::sync::Arc<std::sync::Mutex<Vec<String>>> = 
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_logs_clone = progress_logs.clone();
+        
+        let progress_callback = move |msg: &str| {
+            progress_logs_clone.lock().unwrap().push(msg.to_string());
+            println!("{}", msg);  // 实时输出日志
+        };
+        
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        assert!(result.is_some(), "优化应该成功返回结果");
+        let optimized = result.unwrap();
+        
+        println!("\n=== 优化结果 ===");
+        println!("优化后 XPath: {}", optimized);
+        println!("优化后长度: {} 字符", optimized.len());
+        
+        let compression = (1.0 - optimized.len() as f64 / xpath.len() as f64) * 100.0;
+        println!("压缩率: {:.1}%", compression);
+        
+        // 【关键验证】确保最终 XPath 能唯一定位
+        let final_is_unique = verify_callback(&optimized).unwrap();
+        assert!(final_is_unique, 
+            "❌ 最终 XPath 必须能唯一定位！\nXPath: {}", optimized);
+        
+        // 验证保留了必要的属性
+        assert!(optimized.contains("AutomationId='RootWebArea'"),
+            "❌ AutomationId 是必需的，应该被保留");
+        
+        // 验证至少保留了一个 ClassName（因为需要它来确保唯一性）
+        assert!(optimized.contains("@ClassName=") || optimized.contains("starts-with(@ClassName,"),
+            "❌ 至少需要一个 ClassName 来确保唯一性");
+        
+        // 验证移除了冗余属性
+        let framework_count = optimized.matches("@FrameworkId").count();
+        let localized_count = optimized.matches("@LocalizedControlType").count();
+        
+        println!("\n=== 属性统计 ===");
+        println!("@FrameworkId 出现次数: {} (原始: 4次)", framework_count);
+        println!("@LocalizedControlType 出现次数: {} (原始: 4次)", localized_count);
+        
+        // FrameworkId 和 LocalizedControlType 应该被大量移除
+        assert!(framework_count < 4, "FrameworkId 应该被部分或全部移除");
+        assert!(localized_count < 4, "LocalizedControlType 应该被部分或全部移除");
+        
+        println!("\n✅ 测试通过！极简优化算法正确工作。");
+    }
+    
+    #[test]
+    fn test_optimize_minimal_preserves_essential_attrs() {
+        // 测试保留必要属性：AutomationId 和唯一的 ClassName
+        let xpath = "//Button[@AutomationId='submit' and @Name='提交' and @FrameworkId='Chrome']";
+        
+        // 模拟验证：必须保留 AutomationId
+        let verify_callback = |xpath: &str| -> Result<bool> {
+            Ok(xpath.contains("AutomationId='submit'"))
+        };
+        
+        let progress_callback = |_msg: &str| {};
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        
+        let result = optimize_minimal_with_cancel(
+            xpath,
+            verify_callback,
+            progress_callback,
+            cancel_flag,
+        ).unwrap();
+        
+        assert!(result.is_some());
+        let optimized = result.unwrap();
+        
+        println!("原始: {}", xpath);
+        println!("优化: {}", optimized);
+        
+        // 验证 AutomationId 被保留
+        assert!(optimized.contains("AutomationId='submit'"),
+            "AutomationId 是必需的，应该被保留");
+        
+        // 验证 Name 可能被移除（因为不是必需的）
+        // 注意：这取决于优化算法的尝试顺序
     }
 }
