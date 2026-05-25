@@ -257,9 +257,9 @@ fn render_node(node: &ParsedNode, is_target: bool, opts: &OptimizeOptions) -> St
 fn select_attrs(node: &ParsedNode, is_target: bool, opts: &OptimizeOptions) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    // AutomationId —— 最高优先，直接保留
+    // AutomationId —— 最高优先，直接保留（但跳过纯数字 ID，大概率是随机生成的）
     if let Some(v) = node.get_attr("AutomationId") {
-        if !v.is_empty() {
+        if !v.is_empty() && !is_numeric_aid(v) {
             parts.push(format!("@AutomationId='{}'", v));
             // AutomationId 已经足够唯一，对于锚点节点可以直接返回
             if !is_target {
@@ -312,9 +312,9 @@ fn select_attrs(node: &ParsedNode, is_target: bool, opts: &OptimizeOptions) -> V
 fn anchor_score(node: &ParsedNode) -> u32 {
     let mut score = 0u32;
 
-    // AutomationId：开发者明确设置，全局唯一性最强
+    // AutomationId：开发者明确设置，全局唯一性最强（纯数字 ID 视为随机，不加分）
     if let Some(v) = node.get_attr("AutomationId") {
-        if !v.is_empty() { score += 10; }
+        if !v.is_empty() && !is_numeric_aid(v) { score += 10; }
     }
 
     // Name：有语义且通常稳定，但页面标题类会动态变化
@@ -352,6 +352,11 @@ pub fn tag_uniqueness_bonus(tag: &str) -> u32 {
 // ──────────────────────────────────────────────
 // 辅助判断
 // ──────────────────────────────────────────────
+
+/// 判断是否为纯数字 automation_id（大概率是随机生成的）
+fn is_numeric_aid(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+}
 
 /// 判断 ControlType 是否属于泛型（不具备良好区分度）
 pub fn is_generic_control_type(ct: &str) -> bool {
@@ -732,9 +737,9 @@ where
         ));
         
         // 【关键修复】从完整属性开始，按优先级从低到高逐个尝试移除
-        // 优先级（从低到高）：LocalizedControlType < FrameworkId < Name < ClassName
-        // 【重要】AutomationId 永远不被移除，它是高性能定位的关键
-        let priority_order = ["LocalizedControlType", "FrameworkId", "Name", "ClassName"];
+        // 优先级（从低到高）：LocalizedControlType < FrameworkId < Name < ClassName < AutomationId(非数字)
+        // 【重要】非纯数字 AutomationId 仍尽量保留，但会尝试移除看是否仍能匹配
+        let priority_order = ["LocalizedControlType", "FrameworkId", "Name", "ClassName", "AutomationId"];
         
         // 初始状态：保留所有属性
         let mut attrs_to_keep: Vec<(String, String)> = original_attrs.clone();
