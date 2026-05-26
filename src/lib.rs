@@ -17,3 +17,6 @@ pub use xpath::{
     OptimizeOptions,
     OptimizeResult,
 };
+
+// Re-export TreeScope for find_all usage
+pub use windows::Win32::UI::Accessibility::TreeScope;

@@ -1,7 +1,7 @@
 use crate::error::Result;
 use windows::Win32::UI::Accessibility::{
     IUIAutomation, IUIAutomationCondition, IUIAutomationElement, IUIAutomationTreeWalker,
-    TreeScope_Children, TreeScope_Descendants,
+    TreeScope, TreeScope_Children, TreeScope_Descendants,
 };
 
 #[derive(Clone)]
@@ -54,6 +54,19 @@ impl UiElement {
     }
     pub fn is_offscreen(&self) -> bool {
         unsafe { self.raw.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) }
+    }
+
+    /// Get RuntimeId as a Vec<i32>, for deduplication purposes.
+    pub fn runtime_id(&self) -> Option<Vec<i32>> {
+        unsafe {
+            let variant = self.raw.GetRuntimeId().ok()?;
+            let len = (*variant).rgsabound[0].cElements as usize;
+            let ptr = (*variant).pvData as *const i32;
+            if ptr.is_null() || len == 0 {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(ptr, len).to_vec())
+        }
     }
     pub fn process_id(&self) -> i32 {
         unsafe { self.raw.CurrentProcessId().unwrap_or(0) }
@@ -245,6 +258,25 @@ impl UiElement {
                 Ok(elem) => Ok(Some(UiElement::new(elem, self.automation.clone()))),
                 Err(_) => Ok(None),
             }
+        }
+    }
+
+    /// Use UIA FindAll with a custom TreeScope to find elements.
+    /// Supports: Children, Descendants, Subtree (Element|Descendants), Ancestors, Parent.
+    pub fn find_all(
+        &self,
+        scope: TreeScope,
+        condition: &IUIAutomationCondition,
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAll(scope, condition)?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
         }
     }
 }
