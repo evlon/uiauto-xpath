@@ -1,7 +1,10 @@
 pub mod automation;
+pub mod control_type;
 pub mod element;
 pub mod error;
 pub mod xpath;
+
+pub use control_type::{id_to_name as control_type_id_to_name, name_to_id as control_type_name_to_id};
 
 pub use automation::UiAutomation;
 pub use element::UiElement;

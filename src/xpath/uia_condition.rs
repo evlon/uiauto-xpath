@@ -1,6 +1,7 @@
 use super::ast::*;
 use super::context::Context;
 use super::evaluator::eval_with_attrs;
+use crate::control_type::name_to_id;
 use crate::element::UiElement;
 use crate::error::{Result, XPathError};
 use log::{debug, warn};
@@ -184,11 +185,10 @@ fn collect_conditions_from_expr(
                 unsafe {
                     // 特殊处理：ControlType 需要整数类型，不是字符串
                     let variant = if prop_id == UIA_ControlTypePropertyId {
-                        // 将字符串 'Pane' 等转换为 UIA_ControlType_ID
-                        match map_control_type_name_to_id(value) {
+                        match name_to_id(value) {
                             Some(control_type_id) => {
                                 log::debug!("[UIA Condition] Mapping ControlType '{}' to ID {}", value, control_type_id);
-                                VARIANT::from(control_type_id as i32)
+                                VARIANT::from(control_type_id)
                             },
                             None => {
                                 warn!("[UIA Condition] Unknown ControlType '{}', skipping", value);
@@ -243,56 +243,6 @@ fn map_property_name_to_id(name: &str) -> Option<UIA_PROPERTY_ID> {
             debug!("[UIA Condition] Unsupported property '{}', skipping", name);
             None
         },
-    }
-}
-
-/// 将 ControlType 字符串名称映射到 UIA_ControlType_ID
-fn map_control_type_name_to_id(name: &str) -> Option<u32> {
-    // UIA_ControlType_ID 定义在 windows::Win32::UI::Accessibility 中
-    // 参考：https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controltype-ids
-    match name {
-        "Button" => Some(0xC350),       // UIA_ButtonControlTypeId
-        "Calendar" => Some(0xC351),     // UIA_CalendarControlTypeId
-        "CheckBox" => Some(0xC352),     // UIA_CheckBoxControlTypeId
-        "ComboBox" => Some(0xC353),     // UIA_ComboBoxControlTypeId
-        "Edit" => Some(0xC354),         // UIA_EditControlTypeId
-        "Hyperlink" => Some(0xC355),    // UIA_HyperlinkControlTypeId
-        "Image" => Some(0xC356),        // UIA_ImageControlTypeId
-        "ListItem" => Some(0xC357),     // UIA_ListItemControlTypeId
-        "List" => Some(0xC358),         // UIA_ListControlTypeId
-        "Menu" => Some(0xC359),         // UIA_MenuControlTypeId
-        "MenuBar" => Some(0xC35A),      // UIA_MenuBarControlTypeId
-        "MenuItem" => Some(0xC35B),     // UIA_MenuItemControlTypeId
-        "ProgressBar" => Some(0xC35C),  // UIA_ProgressBarControlTypeId
-        "RadioButton" => Some(0xC35D),  // UIA_RadioButtonControlTypeId
-        "ScrollBar" => Some(0xC35E),    // UIA_ScrollBarControlTypeId
-        "Slider" => Some(0xC35F),       // UIA_SliderControlTypeId
-        "Spinner" => Some(0xC360),      // UIA_SpinnerControlTypeId
-        "StatusBar" => Some(0xC361),    // UIA_StatusBarControlTypeId
-        "Tab" => Some(0xC362),          // UIA_TabControlTypeId
-        "TabItem" => Some(0xC363),      // UIA_TabItemControlTypeId
-        "Text" => Some(0xC364),         // UIA_TextControlTypeId
-        "ToolBar" => Some(0xC365),      // UIA_ToolBarControlTypeId
-        "ToolTip" => Some(0xC366),      // UIA_ToolTipControlTypeId
-        "Tree" => Some(0xC367),         // UIA_TreeControlTypeId
-        "TreeItem" => Some(0xC368),     // UIA_TreeItemControlTypeId
-        "Custom" => Some(0xC369),       // UIA_CustomControlTypeId
-        "Group" => Some(0xC36A),        // UIA_GroupControlTypeId
-        "Thumb" => Some(0xC36B),        // UIA_ThumbControlTypeId
-        "DataGrid" => Some(0xC36C),     // UIA_DataGridControlTypeId
-        "DataItem" => Some(0xC36D),     // UIA_DataItemControlTypeId
-        "Document" => Some(0xC36E),     // UIA_DocumentControlTypeId
-        "SplitButton" => Some(0xC36F),  // UIA_SplitButtonControlTypeId
-        "Window" => Some(0xC370),       // UIA_WindowControlTypeId
-        "Pane" => Some(0xC371),         // UIA_PaneControlTypeId
-        "Header" => Some(0xC372),       // UIA_HeaderControlTypeId
-        "HeaderItem" => Some(0xC373),   // UIA_HeaderItemControlTypeId
-        "Table" => Some(0xC374),        // UIA_TableControlTypeId
-        "TitleBar" => Some(0xC375),     // UIA_TitleBarControlTypeId
-        "Separator" => Some(0xC376),    // UIA_SeparatorControlTypeId
-        "SemanticZoom" => Some(0xC377), // UIA_SemanticZoomControlTypeId
-        "AppBar" => Some(0xC378),       // UIA_AppBarControlTypeId
-        _ => None,
     }
 }
 

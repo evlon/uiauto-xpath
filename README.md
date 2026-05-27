@@ -88,7 +88,8 @@ let elem = uia.from_handle(hwnd)?;
 elem.name();           // 名称
 elem.class_name();     // 类名
 elem.automation_id();  // AutomationId
-elem.control_type_name(); // 控件类型名（如 "Button"）
+elem.node_name();       // 控件类型标准英文名（如 "Button"）
+elem.localized_control_type(); // 控件类型本地化名（如中文版返回 "按钮"）
 elem.is_enabled();     // 是否启用
 elem.process_id();     // 进程ID
 
