@@ -122,6 +122,7 @@ impl UiElement {
         id_to_name(self.control_type_id()).to_string()
     }
 
+    /// Get children using ControlViewWalker (standard UIA control view).
     pub fn children(&self) -> Result<Vec<UiElement>> {
         unsafe {
             let walker: IUIAutomationTreeWalker = self.automation.ControlViewWalker()?;
@@ -135,9 +136,36 @@ impl UiElement {
         }
     }
 
+    /// Get children using RawViewWalker (full UIA raw tree, includes elements
+    /// filtered out of the control view such as Qt/Chrome intermediate layers).
+    /// Falls back to ControlViewWalker if RawViewWalker is unavailable.
+    pub fn raw_children(&self) -> Result<Vec<UiElement>> {
+        unsafe {
+            let walker = match self.automation.RawViewWalker() {
+                Ok(w) => w,
+                Err(_) => {
+                    log::warn!("[UiElement] RawViewWalker unavailable, falling back to ControlViewWalker");
+                    self.automation.ControlViewWalker()?
+                }
+            };
+            let mut out = Vec::new();
+            let mut child = walker.GetFirstChildElement(&self.raw).ok();
+            while let Some(c) = child {
+                out.push(UiElement::new(c.clone(), self.automation.clone()));
+                child = walker.GetNextSiblingElement(&c).ok();
+            }
+            Ok(out)
+        }
+    }
+
+    /// Get parent using RawViewWalker (full UIA raw tree, consistent with capture-side).
+    /// Falls back to ControlViewWalker if RawViewWalker is unavailable.
     pub fn parent(&self) -> Option<UiElement> {
         unsafe {
-            let walker = self.automation.ControlViewWalker().ok()?;
+            let walker = match self.automation.RawViewWalker() {
+                Ok(w) => w,
+                Err(_) => self.automation.ControlViewWalker().ok()?,
+            };
             walker.GetParentElement(&self.raw).ok()
                 .map(|e| UiElement::new(e, self.automation.clone()))
         }
@@ -145,9 +173,35 @@ impl UiElement {
 
     pub fn descendants(&self) -> Result<Vec<UiElement>> {
         let mut out = Vec::new();
-        let mut stack = self.children()?;
-        while let Some(e) = stack.pop() {
-            for c in e.children()? { stack.push(c); }
+        let mut stack: Vec<(UiElement, usize)> = self.children()?
+            .into_iter().map(|c| (c, 1)).collect();
+        const MAX_DEPTH: usize = 32;
+        while let Some((e, depth)) = stack.pop() {
+            if depth < MAX_DEPTH {
+                for c in e.children()? {
+                    stack.push((c, depth + 1));
+                }
+            }
+            out.push(e);
+        }
+        Ok(out)
+    }
+
+    /// Get all descendants using RawViewWalker (full UIA raw tree).
+    /// This includes elements that are filtered out of the control view,
+    /// such as intermediate Group/Pane layers in Qt applications.
+    /// Depth-limited to 32 levels to prevent runaway traversal.
+    pub fn raw_descendants(&self) -> Result<Vec<UiElement>> {
+        let mut out = Vec::new();
+        let mut stack: Vec<(UiElement, usize)> = self.raw_children()?
+            .into_iter().map(|c| (c, 1)).collect();
+        const MAX_DEPTH: usize = 32;
+        while let Some((e, depth)) = stack.pop() {
+            if depth < MAX_DEPTH {
+                for c in e.raw_children()? {
+                    stack.push((c, depth + 1));
+                }
+            }
             out.push(e);
         }
         Ok(out)
@@ -163,9 +217,14 @@ impl UiElement {
         out
     }
 
+    /// Get following siblings using RawViewWalker (full UIA raw tree, consistent with capture-side).
+    /// Falls back to ControlViewWalker if RawViewWalker is unavailable.
     pub fn following_siblings(&self) -> Result<Vec<UiElement>> {
         unsafe {
-            let walker = self.automation.ControlViewWalker()?;
+            let walker = match self.automation.RawViewWalker() {
+                Ok(w) => w,
+                Err(_) => self.automation.ControlViewWalker()?,
+            };
             let mut out = Vec::new();
             let mut s = walker.GetNextSiblingElement(&self.raw).ok();
             while let Some(c) = s {
@@ -176,9 +235,14 @@ impl UiElement {
         }
     }
 
+    /// Get preceding siblings using RawViewWalker (full UIA raw tree, consistent with capture-side).
+    /// Falls back to ControlViewWalker if RawViewWalker is unavailable.
     pub fn preceding_siblings(&self) -> Result<Vec<UiElement>> {
         unsafe {
-            let walker = self.automation.ControlViewWalker()?;
+            let walker = match self.automation.RawViewWalker() {
+                Ok(w) => w,
+                Err(_) => self.automation.ControlViewWalker()?,
+            };
             let mut out = Vec::new();
             let mut s = walker.GetPreviousSiblingElement(&self.raw).ok();
             while let Some(c) = s {

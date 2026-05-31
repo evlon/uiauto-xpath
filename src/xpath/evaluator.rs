@@ -178,44 +178,55 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
         
         for n in &nodes {
             let candidates = if should_optimize {
-                // ★ 两阶段过滤：先用 UIA Condition 快速筛选
+                // ★ 两阶段过滤：先用 UIA Condition 快速筛选，空结果自动回退 raw tree
                 match uia_condition::build_condition_from_analysis(
                     &n.automation, 
                     &step.predicates,
                     &analysis
                 ) {
                     Ok(condition) => {
-                        // 阶段 1：UIA 引擎过滤
-                        let filtered = match effective_axis {
+                        // 阶段 1：UIA 引擎过滤（Control View）
+                        let control_view_result = match effective_axis {
                             Axis::Child => {
-                                match n.find_children_with_condition(&condition) {
-                                    Ok(elems) => {
-                                        log::debug!("[XPath step_through] FindAll(Children) returned {} elements", elems.len());
-                                        elems
-                                    },
-                                    Err(e) => {
-                                        log::warn!("[XPath step_through] FindAll failed: {:?}", e);
-                                        // 不使用回退，直接返回空
+                                n.find_children_with_condition(&condition)
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("[XPath step_through] FindAll(Children) failed: {:?}", e);
                                         Vec::new()
-                                    }
-                                }
+                                    })
                             },
                             Axis::Descendant | Axis::DescendantOrSelf => {
-                                match n.find_descendants_with_condition(&condition) {
-                                    Ok(elems) => {
-                                        log::debug!("[XPath step_through] FindAll(Descendants) returned {} elements", elems.len());
-                                        elems
-                                    },
-                                    Err(e) => {
-                                        log::warn!("[XPath step_through] FindAll failed: {:?}", e);
+                                n.find_descendants_with_condition(&condition)
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("[XPath step_through] FindAll(Descendants) failed: {:?}", e);
                                         Vec::new()
-                                    }
-                                }
+                                    })
                             },
-                            _ => {
-                                // 不支持的轴，使用原有逻辑
-                                axes::select_axis(n, step.axis)?
+                            _ => axes::select_axis(n, step.axis)?
+                        };
+
+                        // ★ 自动回退：当 Control View 的 FindAll 返回空结果时，
+                        // 说明目标元素可能只存在于 Raw View（如 Qt 中间层 Group），
+                        // 回退到 RawViewWalker 遍历 + Rust 层全谓词求值
+                        let filtered = if control_view_result.is_empty() && !step.predicates.is_empty() {
+                            log::debug!("[XPath step_through] FindAll({:?}) returned 0, falling back to raw tree traversal", effective_axis);
+                            let raw_candidates = match effective_axis {
+                                Axis::Child => n.raw_children().unwrap_or_default(),
+                                Axis::Descendant | Axis::DescendantOrSelf => n.raw_descendants().unwrap_or_default(),
+                                _ => Vec::new(),
+                            };
+                            if raw_candidates.is_empty() {
+                                control_view_result
+                            } else {
+                                let after_test: Vec<UiElement> = raw_candidates
+                                    .into_iter()
+                                    .filter(|c| node_test_match(c, &step.test, effective_axis))
+                                    .collect();
+                                log::debug!("[XPath step_through] raw tree fallback: {} after node_test", after_test.len());
+                                // Apply ALL predicates (simple + complex) via Rust layer
+                                apply_all_predicates(after_test, &step.predicates, ctx)?
                             }
+                        } else {
+                            control_view_result
                         };
                         
                         log::debug!("[XPath step_through] Step {}: {} after UIA filter (complex predicates: {})", 
@@ -228,7 +239,8 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                             );
                         }
                         
-                        // 阶段 2：Rust 层应用复杂谓词
+                        // 阶段 2：Rust 层应用复杂谓词（仅当 FindAll 有结果时才需要此阶段，
+                        // 因为 raw tree 回退已经应用了全部谓词）
                         if !analysis.complex_indices.is_empty() {
                             uia_condition::apply_complex_predicates(
                                 filtered, 
@@ -241,13 +253,13 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         }
                     },
                     Err(e) => {
-                        // Condition 构建失败，不使用回退，记录错误并跳过
-                        log::warn!("[XPath step_through] Condition build failed: {:?}", e);
-                        Vec::new()
+                        // Condition 构建失败，回退到 axes::select_axis（RawViewWalker）
+                        log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to raw tree", e);
+                        axes::select_axis(n, step.axis)?
                     }
                 }
             } else {
-                // 不优化的情况：使用原有 TreeWalker 遍历
+                // 不优化的情况：使用 RawViewWalker 遍历（axes::select_axis 内部已用 RawViewWalker）
                 if step.axis == Axis::Attribute {
                     Vec::new()
                 } else {
@@ -258,7 +270,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
             log::debug!("[XPath step_through] Step {}: {} candidates from axis", 
                 step_idx, candidates.len());
             
-            // 节点测试
+            // 节点测试（仅对优化路径需要，非优化路径 axes::select_axis 已返回正确节点）
             let mut after_test: Vec<UiElement> = Vec::new();
             for c in candidates {
                 if node_test_match(&c, &step.test, step.axis) {
@@ -280,9 +292,9 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
     Ok(nodes)
 }
 
-fn node_test_match(node: &UiElement, test: &NodeTest, axis: Axis) -> bool {
+fn node_test_match(node: &UiElement, test: &NodeTest, _axis: Axis) -> bool {
     match test {
-        NodeTest::Wildcard => axis != Axis::Attribute,
+        NodeTest::Wildcard => true, // All elements in the raw tree are valid
         NodeTest::Node => true,
         NodeTest::Text | NodeTest::Comment | NodeTest::ProcessingInstruction(_) => false,
         NodeTest::Name(n) => {
@@ -298,7 +310,6 @@ fn apply_predicate(nodes: &[UiElement], pred: &Expr, ctx: &Context) -> Result<Ve
     let mut out = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         let sub = ctx.with_node(n.clone(), i + 1, size);
-        // 处理属性谓词 @attr 和 @attr=...
         let v = eval_predicate(pred, &sub)?;
         log::debug!("[apply_predicate] node {} {}: class='{}' predicate result={:?}", i, n.node_name(), n.class_name(), v);
         let keep = match v {
@@ -310,8 +321,25 @@ fn apply_predicate(nodes: &[UiElement], pred: &Expr, ctx: &Context) -> Result<Ve
     Ok(out)
 }
 
+/// Apply ALL predicates (both simple and complex) via Rust-layer evaluation.
+/// Used when falling back from UIA Condition (Control View) to raw tree traversal,
+/// because raw tree candidates haven't been filtered by UIA Condition.
+fn apply_all_predicates(
+    candidates: Vec<UiElement>,
+    predicates: &[Expr],
+    ctx: &Context,
+) -> Result<Vec<UiElement>> {
+    if predicates.is_empty() {
+        return Ok(candidates);
+    }
+    let mut result = candidates;
+    for pred in predicates {
+        result = apply_predicate(&result, pred, ctx)?;
+    }
+    Ok(result)
+}
+
 fn eval_predicate(expr: &Expr, ctx: &Context) -> Result<Value> {
-    // 特殊处理：@attr 解析 -> 当前节点属性的字符串值（NodeSet 包含 0/1 个伪节点用 String 表达）
     eval_with_attrs(expr, ctx)
 }
 
