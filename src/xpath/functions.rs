@@ -46,7 +46,21 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
                     match ctx.node.find_first_child_with_condition(&cond) {
                         Ok(Some(elem)) => {
                             log::debug!("[id()] Found element in children with AutomationId='{}'", id_str);
-                            return Ok(Value::NodeSet(vec![elem]));
+                            // 应用可见性过滤
+                            if ctx.visibility_filter == super::context::VisibilityFilter::All {
+                                return Ok(Value::NodeSet(vec![elem]));
+                            } else {
+                                let is_offscreen = elem.is_offscreen();
+                                let visible_only = ctx.visibility_filter == super::context::VisibilityFilter::VisibleOnly;
+                                let offscreen_only = ctx.visibility_filter == super::context::VisibilityFilter::OffscreenOnly;
+                                
+                                if (visible_only && !is_offscreen) || (offscreen_only && is_offscreen) {
+                                    return Ok(Value::NodeSet(vec![elem]));
+                                } else {
+                                    log::debug!("[id()] Element filtered by visibility: is_offscreen={}, filter={:?}", is_offscreen, ctx.visibility_filter);
+                                    return Ok(Value::NodeSet(vec![]));
+                                }
+                            }
                         },
                         Ok(None) => {
                             log::debug!("[id()] Not found in children, trying descendants...");
@@ -60,7 +74,21 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
                     match ctx.node.find_first_descendant_with_condition(&cond) {
                         Ok(Some(elem)) => {
                             log::debug!("[id()] Found element in descendants with AutomationId='{}'", id_str);
-                            return Ok(Value::NodeSet(vec![elem]));
+                            // 应用可见性过滤
+                            if ctx.visibility_filter == super::context::VisibilityFilter::All {
+                                return Ok(Value::NodeSet(vec![elem]));
+                            } else {
+                                let is_offscreen = elem.is_offscreen();
+                                let visible_only = ctx.visibility_filter == super::context::VisibilityFilter::VisibleOnly;
+                                let offscreen_only = ctx.visibility_filter == super::context::VisibilityFilter::OffscreenOnly;
+                                
+                                if (visible_only && !is_offscreen) || (offscreen_only && is_offscreen) {
+                                    return Ok(Value::NodeSet(vec![elem]));
+                                } else {
+                                    log::debug!("[id()] Element filtered by visibility: is_offscreen={}, filter={:?}", is_offscreen, ctx.visibility_filter);
+                                    return Ok(Value::NodeSet(vec![]));
+                                }
+                            }
                         },
                         Ok(None) => {
                             log::debug!("[id()] No element found with AutomationId='{}'", id_str);

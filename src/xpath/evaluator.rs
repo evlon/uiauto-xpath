@@ -299,6 +299,21 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
         nodes = next;
         log::debug!("[XPath step_through] Step {}: {} nodes after step", step_idx, nodes.len());
     }
+    
+    // 应用可见性过滤（在所有步骤完成后）
+    if ctx.visibility_filter != super::context::VisibilityFilter::All {
+        let before_filter = nodes.len();
+        nodes.retain(|elem| {
+            let is_offscreen = elem.is_offscreen();
+            match ctx.visibility_filter {
+                super::context::VisibilityFilter::VisibleOnly => !is_offscreen,
+                super::context::VisibilityFilter::OffscreenOnly => is_offscreen,
+                super::context::VisibilityFilter::All => true,
+            }
+        });
+        log::debug!("[XPath step_through] Visibility filter: {} -> {} nodes", before_filter, nodes.len());
+    }
+    
     Ok(nodes)
 }
 

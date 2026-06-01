@@ -21,6 +21,9 @@ pub use optimizer::{
     optimize_minimal_with_cancel,
 };
 
+// 导出可见性过滤选项
+pub use context::VisibilityFilter;
+
 use crate::element::UiElement;
 use crate::error::Result;
 
@@ -52,6 +55,30 @@ impl XPath {
 
     pub fn select_first(&self, root: &UiElement) -> Result<Option<UiElement>> {
         Ok(self.select_nodes(root)?.into_iter().next())
+    }
+
+    /// 使用可见性过滤选择节点
+    pub fn select_nodes_with_visibility(
+        &self,
+        root: &UiElement,
+        visibility_filter: VisibilityFilter,
+    ) -> Result<Vec<UiElement>> {
+        let ctx = context::Context::new(root.clone())
+            .with_visibility_filter(visibility_filter);
+        match evaluator::eval(&self.expr, &ctx)? {
+            value::Value::NodeSet(ns) => Ok(ns),
+            other => Err(crate::error::XPathError::TypeError(
+                format!("expected node-set, got {:?}", other.type_name())
+            )),
+        }
+    }
+
+    pub fn select_first_with_visibility(
+        &self,
+        root: &UiElement,
+        visibility_filter: VisibilityFilter,
+    ) -> Result<Option<UiElement>> {
+        Ok(self.select_nodes_with_visibility(root, visibility_filter)?.into_iter().next())
     }
 
     // src/xpath/mod.rs
