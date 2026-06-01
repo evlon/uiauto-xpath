@@ -177,10 +177,10 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
             analysis.expected_benefit, should_optimize);
         
         for n in &nodes {
-            let candidates = if should_optimize {
+            let (candidates, predicates_fully_applied) = if should_optimize {
                 // ★ 两阶段过滤：先用 UIA Condition 快速筛选，空结果自动回退 raw tree
                 match uia_condition::build_condition_from_analysis(
-                    &n.automation, 
+                    &n.automation,
                     &step.predicates,
                     &analysis
                 ) {
@@ -207,6 +207,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         // ★ 自动回退：当 Control View 的 FindAll 返回空结果时，
                         // 说明目标元素可能只存在于 Raw View（如 Qt 中间层 Group），
                         // 回退到 RawViewWalker 遍历 + Rust 层全谓词求值
+                        let mut predicates_fully_applied = false;
                         let filtered = if control_view_result.is_empty() && !step.predicates.is_empty() {
                             log::debug!("[XPath step_through] FindAll({:?}) returned 0, falling back to raw tree traversal", effective_axis);
                             let raw_candidates = match effective_axis {
@@ -223,6 +224,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                                     .collect();
                                 log::debug!("[XPath step_through] raw tree fallback: {} after node_test", after_test.len());
                                 // Apply ALL predicates (simple + complex) via Rust layer
+                                predicates_fully_applied = true;
                                 apply_all_predicates(after_test, &step.predicates, ctx)?
                             }
                         } else {
@@ -241,29 +243,32 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         
                         // 阶段 2：Rust 层应用复杂谓词（仅当 FindAll 有结果时才需要此阶段，
                         // 因为 raw tree 回退已经应用了全部谓词）
-                        if !analysis.complex_indices.is_empty() {
+                        let candidates = if predicates_fully_applied {
+                            filtered
+                        } else if !analysis.complex_indices.is_empty() {
                             uia_condition::apply_complex_predicates(
-                                filtered, 
-                                &step.predicates, 
+                                filtered,
+                                &step.predicates,
                                 &analysis.complex_indices,
                                 ctx
                             )?
                         } else {
                             filtered
-                        }
+                        };
+                        (candidates, predicates_fully_applied)
                     },
                     Err(e) => {
                         // Condition 构建失败，回退到 axes::select_axis（RawViewWalker）
                         log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to raw tree", e);
-                        axes::select_axis(n, step.axis)?
+                        (axes::select_axis(n, step.axis)?, false)
                     }
                 }
             } else {
                 // 不优化的情况：使用 RawViewWalker 遍历（axes::select_axis 内部已用 RawViewWalker）
                 if step.axis == Axis::Attribute {
-                    Vec::new()
+                    (Vec::new(), false)
                 } else {
-                    axes::select_axis(n, step.axis)?
+                    (axes::select_axis(n, step.axis)?, false)
                 }
             };
             
@@ -278,6 +283,11 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                 }
             }
             log::debug!("[XPath step_through] Step {}: {} after node test", step_idx, after_test.len());
+
+            if !predicates_fully_applied && !step.predicates.is_empty() {
+                after_test = apply_all_predicates(after_test, &step.predicates, ctx)?;
+                log::debug!("[XPath step_through] Step {}: {} after predicate filter", step_idx, after_test.len());
+            }
 
             // 去重
             for c in after_test {

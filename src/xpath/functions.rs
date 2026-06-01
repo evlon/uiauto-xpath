@@ -171,7 +171,7 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
         }
         "upper-case" => { arity!(1); Value::String(args[0].to_string_value().to_uppercase()) }
         "lower-case" => { arity!(1); Value::String(args[0].to_string_value().to_lowercase()) }
-        "matches" => { // XPath 2.0
+        "matches" | "match" => { // XPath 2.0 + SDK alias
             arity!(2, 3);
             let s = args[0].to_string_value();
             let p = args[1].to_string_value();
