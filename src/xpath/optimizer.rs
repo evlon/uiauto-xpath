@@ -289,7 +289,8 @@ fn select_attrs(node: &ParsedNode, is_target: bool, opts: &OptimizeOptions) -> V
     // Name —— 目标节点保留（但截断过长的动态标题），锚点节点视分值决定
     if let Some(name) = node.get_attr("Name") {
         let limit = if is_target { opts.max_name_length_in_target } else { 20 };
-        if !name.is_empty() && name.len() <= limit {
+        // 使用字符数而非字节数，避免中文/emoji 等 UTF-8 多字节字符被误判过长
+        if !name.is_empty() && name.chars().count() <= limit {
             parts.push(format!("@Name='{}'", name));
         }
     }

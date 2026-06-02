@@ -1,9 +1,52 @@
 use crate::control_type::id_to_name;
 use crate::error::Result;
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationCondition, IUIAutomationElement, IUIAutomationTreeWalker,
-    TreeScope, TreeScope_Children, TreeScope_Descendants,
+    IUIAutomation, IUIAutomationCacheRequest, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationTreeWalker, TreeScope, TreeScope_Children, TreeScope_Descendants,
+    AutomationElementMode_Full, UIA_PROPERTY_ID,
+    UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId, UIA_FrameworkIdPropertyId, UIA_HelpTextPropertyId,
+    UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId,
+    UIA_NamePropertyId, UIA_ProcessIdPropertyId, UIA_AcceleratorKeyPropertyId,
+    UIA_AccessKeyPropertyId, UIA_ItemTypePropertyId, UIA_ItemStatusPropertyId,
+    UIA_LocalizedControlTypePropertyId, UIA_BoundingRectanglePropertyId,
 };
+
+/// Default set of property IDs to prefetch when using BuildCache.
+/// These are the properties most commonly accessed during XPath evaluation.
+pub const DEFAULT_CACHE_PROPERTIES: [UIA_PROPERTY_ID; 16] = [
+    UIA_NamePropertyId,
+    UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId,
+    UIA_AutomationIdPropertyId,
+    UIA_FrameworkIdPropertyId,
+    UIA_IsEnabledPropertyId,
+    UIA_IsOffscreenPropertyId,
+    UIA_IsPasswordPropertyId,
+    UIA_ProcessIdPropertyId,
+    UIA_HelpTextPropertyId,
+    UIA_AcceleratorKeyPropertyId,
+    UIA_AccessKeyPropertyId,
+    UIA_ItemTypePropertyId,
+    UIA_ItemStatusPropertyId,
+    UIA_LocalizedControlTypePropertyId,
+    UIA_BoundingRectanglePropertyId,
+];
+
+/// Create a default IUIAutomationCacheRequest that prefetches the most commonly
+/// used properties for XPath evaluation. This eliminates per-element cross-process
+/// COM calls for these properties.
+pub fn create_default_cache_request(auto: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    unsafe {
+        let cache_request = auto.CreateCacheRequest()?;
+        for &prop_id in &DEFAULT_CACHE_PROPERTIES {
+            cache_request.AddProperty(prop_id)?;
+        }
+        // Full mode: cached elements support both Cached and Current property access
+        cache_request.SetAutomationElementMode(AutomationElementMode_Full)?;
+        Ok(cache_request)
+    }
+}
 
 #[derive(Clone)]
 pub struct UiElement {
@@ -32,23 +75,51 @@ impl UiElement {
         Self { raw, automation }
     }
 
+    // ─── Cached property accessors ──────────────────────────────────────
+    // Try Cached* first (if the property was prefetched via BuildCache),
+    // fall back to Current* if the cache miss occurs.
+
     pub fn name(&self) -> String {
-        unsafe { self.raw.CurrentName().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentName().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn class_name(&self) -> String {
-        unsafe { self.raw.CurrentClassName().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedClassName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentClassName().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn automation_id(&self) -> String {
-        unsafe { self.raw.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedAutomationId()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn control_type_id(&self) -> i32 {
-        unsafe { self.raw.CurrentControlType().map(|c| c.0).unwrap_or(0) }
+        unsafe {
+            self.raw.CachedControlType()
+                .map(|c| c.0)
+                .unwrap_or_else(|_| self.raw.CurrentControlType().map(|c| c.0).unwrap_or(0))
+        }
     }
     pub fn is_enabled(&self) -> bool {
-        unsafe { self.raw.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(false) }
+        unsafe {
+            self.raw.CachedIsEnabled()
+                .map(|b| b.as_bool())
+                .unwrap_or_else(|_| self.raw.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(false))
+        }
     }
     pub fn is_offscreen(&self) -> bool {
-        unsafe { self.raw.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) }
+        unsafe {
+            self.raw.CachedIsOffscreen()
+                .map(|b| b.as_bool())
+                .unwrap_or_else(|_| self.raw.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false))
+        }
     }
 
     /// Get RuntimeId as a Vec<i32>, for deduplication purposes.
@@ -64,31 +135,66 @@ impl UiElement {
         }
     }
     pub fn process_id(&self) -> i32 {
-        unsafe { self.raw.CurrentProcessId().unwrap_or(0) }
+        unsafe {
+            self.raw.CachedProcessId()
+                .unwrap_or_else(|_| self.raw.CurrentProcessId().unwrap_or(0))
+        }
     }
     pub fn help_text(&self) -> String {
-        unsafe { self.raw.CurrentHelpText().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedHelpText()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentHelpText().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn framework_id(&self) -> String {
-        unsafe { self.raw.CurrentFrameworkId().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedFrameworkId()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentFrameworkId().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn is_password(&self) -> bool {
-        unsafe { self.raw.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) }
+        unsafe {
+            self.raw.CachedIsPassword()
+                .map(|b| b.as_bool())
+                .unwrap_or_else(|_| self.raw.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false))
+        }
     }
     pub fn accelerator_key(&self) -> String {
-        unsafe { self.raw.CurrentAcceleratorKey().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedAcceleratorKey()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentAcceleratorKey().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn access_key(&self) -> String {
-        unsafe { self.raw.CurrentAccessKey().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedAccessKey()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentAccessKey().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn item_type(&self) -> String {
-        unsafe { self.raw.CurrentItemType().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedItemType()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentItemType().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn item_status(&self) -> String {
-        unsafe { self.raw.CurrentItemStatus().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedItemStatus()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentItemStatus().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
     pub fn localized_control_type(&self) -> String {
-        unsafe { self.raw.CurrentLocalizedControlType().map(|s| s.to_string()).unwrap_or_default() }
+        unsafe {
+            self.raw.CachedLocalizedControlType()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.raw.CurrentLocalizedControlType().map(|s| s.to_string()).unwrap_or_default())
+        }
     }
 
     /// 获取属性的字符串表示，用于 XPath 属性匹配 (@xxx)
@@ -121,6 +227,8 @@ impl UiElement {
     pub fn node_name(&self) -> String {
         id_to_name(self.control_type_id()).to_string()
     }
+
+    // ─── Tree traversal ─────────────────────────────────────────────────
 
     /// Get children using ControlViewWalker (standard UIA control view).
     pub fn children(&self) -> Result<Vec<UiElement>> {
@@ -260,6 +368,8 @@ impl UiElement {
         }
     }
 
+    // ─── Find with Condition (no cache) ─────────────────────────────────
+
     /// 使用 UIA FindAll 快速查找子元素（带条件过滤）
     pub fn find_children_with_condition(
         &self,
@@ -329,6 +439,111 @@ impl UiElement {
     ) -> Result<Vec<UiElement>> {
         unsafe {
             let elements = self.raw.FindAll(scope, condition)?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
+        }
+    }
+
+    // ─── Find with BuildCache (prefetch properties) ─────────────────────
+    // These methods use FindFirstBuildCache / FindAllBuildCache to prefetch
+    // commonly accessed properties into the UIA cache. This eliminates
+    // per-element cross-process COM calls for cached properties.
+    //
+    // Cached properties are accessed via CachedXxx() methods on
+    // IUIAutomationElement. Our property accessors (name(), class_name(),
+    // etc.) automatically try Cached* first and fall back to Current*.
+
+    /// Find children with condition + BuildCache to prefetch properties.
+    /// Returns elements whose cached properties are pre-populated, avoiding
+    /// subsequent cross-process COM calls for each property access.
+    pub fn find_children_with_condition_cached(
+        &self,
+        condition: &IUIAutomationCondition,
+        cache_request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAllBuildCache(
+                TreeScope_Children,
+                condition,
+                cache_request,
+            )?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
+        }
+    }
+
+    /// Find descendants with condition + BuildCache to prefetch properties.
+    /// This is the most impactful optimization: for WebView trees with thousands
+    /// of elements, it eliminates N * M cross-process calls (N elements * M properties)
+    /// by batching property prefetch into the FindAll call itself.
+    pub fn find_descendants_with_condition_cached(
+        &self,
+        condition: &IUIAutomationCondition,
+        cache_request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAllBuildCache(
+                TreeScope_Descendants,
+                condition,
+                cache_request,
+            )?;
+            let count = elements.Length()?;
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let elem = elements.GetElement(i)?;
+                result.push(UiElement::new(elem, self.automation.clone()));
+            }
+            Ok(result)
+        }
+    }
+
+    /// Find first child with condition + BuildCache.
+    pub fn find_first_child_with_condition_cached(
+        &self,
+        condition: &IUIAutomationCondition,
+        cache_request: &IUIAutomationCacheRequest,
+    ) -> Result<Option<UiElement>> {
+        unsafe {
+            match self.raw.FindFirstBuildCache(TreeScope_Children, condition, cache_request) {
+                Ok(elem) => Ok(Some(UiElement::new(elem, self.automation.clone()))),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+
+    /// Find first descendant with condition + BuildCache.
+    pub fn find_first_descendant_with_condition_cached(
+        &self,
+        condition: &IUIAutomationCondition,
+        cache_request: &IUIAutomationCacheRequest,
+    ) -> Result<Option<UiElement>> {
+        unsafe {
+            match self.raw.FindFirstBuildCache(TreeScope_Descendants, condition, cache_request) {
+                Ok(elem) => Ok(Some(UiElement::new(elem, self.automation.clone()))),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+
+    /// Generic FindAllBuildCache with custom TreeScope.
+    pub fn find_all_cached(
+        &self,
+        scope: TreeScope,
+        condition: &IUIAutomationCondition,
+        cache_request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<UiElement>> {
+        unsafe {
+            let elements = self.raw.FindAllBuildCache(scope, condition, cache_request)?;
             let count = elements.Length()?;
             let mut result = Vec::with_capacity(count as usize);
             for i in 0..count {

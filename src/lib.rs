@@ -21,5 +21,7 @@ pub use xpath::{
     OptimizeResult,
 };
 
-// Re-export TreeScope for find_all usage
+// Re-export TreeScope and CacheRequest-related types for BuildCache usage
 pub use windows::Win32::UI::Accessibility::TreeScope;
+pub use windows::Win32::UI::Accessibility::IUIAutomationCacheRequest;
+pub use element::{create_default_cache_request, DEFAULT_CACHE_PROPERTIES};

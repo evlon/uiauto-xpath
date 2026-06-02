@@ -176,25 +176,52 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
             matches!(effective_axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf),
             analysis.expected_benefit, should_optimize);
         
+        // ★ Create a CacheRequest for BuildCache optimization.
+        // When should_optimize is true, we'll use FindAllBuildCache instead of FindAll,
+        // which prefetches commonly accessed properties (Name, ControlType, ClassName, etc.)
+        // into the UIA cache. This eliminates per-element cross-process COM calls.
+        let cache_request = if should_optimize {
+            crate::element::create_default_cache_request(&nodes[0].automation).ok()
+        } else {
+            None
+        };
+
         for n in &nodes {
             let (candidates, predicates_fully_applied) = if should_optimize {
-                // ★ 两阶段过滤：先用 UIA Condition 快速筛选，空结果自动回退 raw tree
+                // ★ 两阶段过滤：先用 UIA Condition 快速筛选 + BuildCache 预取属性
                 match uia_condition::build_condition_from_analysis(
                     &n.automation,
                     &step.predicates,
                     &analysis
                 ) {
                     Ok(condition) => {
-                        // 阶段 1：UIA 引擎过滤（Control View）
-                        let control_view_result = match effective_axis {
-                            Axis::Child => {
+                        // 阶段 1：UIA 引擎过滤（Control View）+ BuildCache 预取属性
+                        let control_view_result = match (&effective_axis, &cache_request) {
+                            (Axis::Child, Some(cr)) => {
+                                n.find_children_with_condition_cached(&condition, cr)
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("[XPath step_through] FindAllBuildCache(Children) failed: {:?}, falling back", e);
+                                        n.find_children_with_condition(&condition)
+                                            .unwrap_or_default()
+                                    })
+                            },
+                            (Axis::Descendant | Axis::DescendantOrSelf, Some(cr)) => {
+                                n.find_descendants_with_condition_cached(&condition, cr)
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("[XPath step_through] FindAllBuildCache(Descendants) failed: {:?}, falling back", e);
+                                        n.find_descendants_with_condition(&condition)
+                                            .unwrap_or_default()
+                                    })
+                            },
+                            // Fallback when CacheRequest creation failed
+                            (Axis::Child, None) => {
                                 n.find_children_with_condition(&condition)
                                     .unwrap_or_else(|e| {
                                         log::warn!("[XPath step_through] FindAll(Children) failed: {:?}", e);
                                         Vec::new()
                                     })
                             },
-                            Axis::Descendant | Axis::DescendantOrSelf => {
+                            (Axis::Descendant | Axis::DescendantOrSelf, None) => {
                                 n.find_descendants_with_condition(&condition)
                                     .unwrap_or_else(|e| {
                                         log::warn!("[XPath step_through] FindAll(Descendants) failed: {:?}", e);
