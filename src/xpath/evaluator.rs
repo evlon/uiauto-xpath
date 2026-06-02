@@ -207,8 +207,13 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         // ★ 自动回退：当 Control View 的 FindAll 返回空结果时，
                         // 说明目标元素可能只存在于 Raw View（如 Qt 中间层 Group），
                         // 回退到 RawViewWalker 遍历 + Rust 层全谓词求值
+                        //
+                        // 严格模式下跳过回退：strict_control_view 时 FindAll 空即空
                         let mut predicates_fully_applied = false;
-                        let filtered = if control_view_result.is_empty() && !step.predicates.is_empty() {
+                        let filtered = if !ctx.strict_control_view
+                            && control_view_result.is_empty()
+                            && !step.predicates.is_empty()
+                        {
                             log::debug!("[XPath step_through] FindAll({:?}) returned 0, falling back to raw tree traversal", effective_axis);
                             let raw_candidates = match effective_axis {
                                 Axis::Child => n.raw_children().unwrap_or_default(),
@@ -258,15 +263,24 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         (candidates, predicates_fully_applied)
                     },
                     Err(e) => {
-                        // Condition 构建失败，回退到 axes::select_axis（RawViewWalker）
-                        log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to raw tree", e);
-                        (axes::select_axis(n, step.axis)?, false)
+                        // Condition 构建失败，回退到 axes 遍历
+                        // 严格模式下使用 ControlViewWalker，普通模式使用 RawViewWalker
+                        if ctx.strict_control_view {
+                            log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to strict control tree", e);
+                            (axes::select_axis_strict(n, step.axis)?, false)
+                        } else {
+                            log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to raw tree", e);
+                            (axes::select_axis(n, step.axis)?, false)
+                        }
                     }
                 }
             } else {
-                // 不优化的情况：使用 RawViewWalker 遍历（axes::select_axis 内部已用 RawViewWalker）
+                // 不优化的情况
+                // 严格模式下使用 ControlViewWalker，普通模式使用 RawViewWalker
                 if step.axis == Axis::Attribute {
                     (Vec::new(), false)
+                } else if ctx.strict_control_view {
+                    (axes::select_axis_strict(n, step.axis)?, false)
                 } else {
                     (axes::select_axis(n, step.axis)?, false)
                 }

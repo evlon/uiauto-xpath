@@ -17,6 +17,10 @@ pub struct Context {
     pub size: usize,
     pub vars: HashMap<String, Value>,
     pub visibility_filter: VisibilityFilter,
+    /// 严格 ControlView 模式：禁用 RawViewWalker 回退。
+    /// 当 FindAll (Control View) 返回空时直接返回空，不回退到 RawViewWalker 遍历。
+    /// 用于 `[fast]` 前缀的 XPath 定位 —— 性能极致，找不到就是找不到。
+    pub strict_control_view: bool,
 }
 
 impl Context {
@@ -28,6 +32,7 @@ impl Context {
             size: 1,
             vars: HashMap::new(),
             visibility_filter: VisibilityFilter::All,
+            strict_control_view: false,
         }
     }
 
@@ -40,6 +45,13 @@ impl Context {
     pub fn with_visibility_filter(&self, filter: VisibilityFilter) -> Self {
         let mut c = self.clone();
         c.visibility_filter = filter;
+        c
+    }
+
+    /// 启用严格 ControlView 模式
+    pub fn with_strict_control_view(&self) -> Self {
+        let mut c = self.clone();
+        c.strict_control_view = true;
         c
     }
 }

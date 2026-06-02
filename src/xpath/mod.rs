@@ -53,6 +53,18 @@ impl XPath {
         }
     }
 
+    /// 严格 ControlView 模式：只使用 ControlViewWalker，不回退 RawViewWalker。
+    /// 用于 `[fast]` 前缀的 XPath 定位 —— FindAll 返回空即空。
+    pub fn select_nodes_strict(&self, root: &UiElement) -> Result<Vec<UiElement>> {
+        let ctx = context::Context::new(root.clone()).with_strict_control_view();
+        match evaluator::eval(&self.expr, &ctx)? {
+            value::Value::NodeSet(ns) => Ok(ns),
+            other => Err(crate::error::XPathError::TypeError(
+                format!("expected node-set, got {:?}", other.type_name())
+            )),
+        }
+    }
+
     pub fn select_first(&self, root: &UiElement) -> Result<Option<UiElement>> {
         Ok(self.select_nodes(root)?.into_iter().next())
     }

@@ -10,14 +10,32 @@ use crate::error::Result;
 /// (e.g., Qt/WeChat), which causes XPath lookups to fail for elements that
 /// were captured via RawViewWalker.
 pub fn select_axis(node: &UiElement, axis: Axis) -> Result<Vec<UiElement>> {
+    select_axis_impl(node, axis, false)
+}
+
+/// Strict version: uses ControlViewWalker for Child/Descendant/DescendantOrSelf.
+/// No RawViewWalker fallback. Used for `[fast]` XPath location.
+pub fn select_axis_strict(node: &UiElement, axis: Axis) -> Result<Vec<UiElement>> {
+    select_axis_impl(node, axis, true)
+}
+
+fn select_axis_impl(node: &UiElement, axis: Axis, strict: bool) -> Result<Vec<UiElement>> {
     Ok(match axis {
         Axis::Self_ => vec![node.clone()],
-        Axis::Child => node.raw_children()?,
+        Axis::Child => {
+            if strict { node.children()? } else { node.raw_children()? }
+        }
         Axis::Parent => node.parent().into_iter().collect(),
-        Axis::Descendant => node.raw_descendants()?,
+        Axis::Descendant => {
+            if strict { node.descendants()? } else { node.raw_descendants()? }
+        }
         Axis::DescendantOrSelf => {
             let mut v = vec![node.clone()];
-            v.extend(node.raw_descendants()?);
+            if strict {
+                v.extend(node.descendants()?);
+            } else {
+                v.extend(node.raw_descendants()?);
+            }
             v
         }
         Axis::Ancestor => node.ancestors(),
@@ -34,7 +52,11 @@ pub fn select_axis(node: &UiElement, axis: Axis) -> Result<Vec<UiElement>> {
             while let Some(c) = cur {
                 for s in c.following_siblings()? {
                     out.push(s.clone());
-                    out.extend(s.raw_descendants()?);
+                    if strict {
+                        out.extend(s.descendants()?);
+                    } else {
+                        out.extend(s.raw_descendants()?);
+                    }
                 }
                 cur = c.parent();
             }
@@ -45,7 +67,11 @@ pub fn select_axis(node: &UiElement, axis: Axis) -> Result<Vec<UiElement>> {
             let mut cur = Some(node.clone());
             while let Some(c) = cur {
                 for s in c.preceding_siblings()? {
-                    out.extend(s.raw_descendants()?);
+                    if strict {
+                        out.extend(s.descendants()?);
+                    } else {
+                        out.extend(s.raw_descendants()?);
+                    }
                     out.push(s);
                 }
                 cur = c.parent();

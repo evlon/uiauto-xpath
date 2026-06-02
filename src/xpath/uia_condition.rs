@@ -183,8 +183,9 @@ fn collect_conditions_from_expr(
             // 映射到 UIA Property ID
             if let Some(prop_id) = map_property_name_to_id(attr_name) {
                 unsafe {
-                    // 特殊处理：ControlType 需要整数类型，不是字符串
+                    // 特殊处理：根据属性类型构建不同类型的 VARIANT
                     let variant = if prop_id == UIA_ControlTypePropertyId {
+                        // ControlType 需要整数类型
                         match name_to_id(value) {
                             Some(control_type_id) => {
                                 log::debug!("[UIA Condition] Mapping ControlType '{}' to ID {}", value, control_type_id);
@@ -195,6 +196,19 @@ fn collect_conditions_from_expr(
                                 return Ok(());
                             }
                         }
+                    } else if is_bool_property(prop_id) {
+                        // 布尔属性需要 VT_BOOL
+                        let bool_val: i16 = match value.to_ascii_lowercase().as_str() {
+                            "true" | "1" => -1,  // VARIANT_TRUE
+                            _ => 0,              // VARIANT_FALSE
+                        };
+                        let mut variant = VARIANT::default();
+                        let var_ptr = &mut variant as *mut VARIANT;
+                        let vt_ptr = var_ptr as *mut VARENUM;
+                        std::ptr::write(vt_ptr, VT_BOOL);
+                        let bool_ptr = (var_ptr as *mut u8).add(8) as *mut i16;
+                        std::ptr::write(bool_ptr, bool_val);
+                        variant
                     } else {
                         // 其他属性使用字符串
                         VARIANT::from(BSTR::from(value.as_str()))
@@ -239,11 +253,21 @@ fn map_property_name_to_id(name: &str) -> Option<UIA_PROPERTY_ID> {
         "accesskey" => Some(UIA_AccessKeyPropertyId),
         "itemtype" => Some(UIA_ItemTypePropertyId),
         "itemstatus" => Some(UIA_ItemStatusPropertyId),
+        "isoffscreen" => Some(UIA_IsOffscreenPropertyId),
+        "isenabled" => Some(UIA_IsEnabledPropertyId),
+        "ispassword" => Some(UIA_IsPasswordPropertyId),
         _ => {
             debug!("[UIA Condition] Unsupported property '{}', skipping", name);
             None
         },
     }
+}
+
+/// 判断是否为布尔类型的 UIA 属性
+fn is_bool_property(prop_id: UIA_PROPERTY_ID) -> bool {
+    prop_id == UIA_IsOffscreenPropertyId
+        || prop_id == UIA_IsEnabledPropertyId
+        || prop_id == UIA_IsPasswordPropertyId
 }
 
 /// 在 Rust 层应用复杂谓词过滤
