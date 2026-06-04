@@ -5,6 +5,7 @@ use super::functions;
 use super::value::Value;
 use crate::element::UiElement;
 use crate::error::{Result, XPathError};
+use std::collections::HashSet;
 
 pub type XPathResult = Value;
 
@@ -17,11 +18,18 @@ pub fn eval(expr: &Expr, ctx: &Context) -> Result<Value> {
         Expr::UnaryMinus(e) => Ok(Value::Number(-eval(e, ctx)?.to_number())),
         Expr::Union(parts) => {
             let mut out: Vec<UiElement> = Vec::new();
+            let mut seen_ids: HashSet<Vec<i32>> = HashSet::new();
             for p in parts {
                 match eval(p, ctx)? {
                     Value::NodeSet(ns) => {
                         for n in ns {
-                            if !out.iter().any(|x| x.equals(&n)) { out.push(n); }
+                            if let Some(rid) = n.runtime_id() {
+                                if seen_ids.insert(rid) {
+                                    out.push(n);
+                                }
+                            } else if !out.iter().any(|x| x.equals(&n)) {
+                                out.push(n);
+                            }
                         }
                     }
                     _ => return Err(XPathError::TypeError("union requires node-sets".into())),
@@ -124,7 +132,14 @@ fn eval_path(p: &PathExpr, ctx: &Context) -> Result<Value> {
 }
 
 fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Result<Vec<UiElement>> {
+    let step_through_start = std::time::Instant::now();
     log::debug!("[XPath step_through] Starting with {} nodes, {} steps", nodes.len(), steps.len());
+    
+    // Guard: if nodes is empty, nothing to process
+    if nodes.is_empty() {
+        log::warn!("[XPath step_through] Empty nodes list, returning empty result");
+        return Ok(Vec::new());
+    }
     
     // ★ 特殊优化：如果 Step 0 是 DescendantOrSelf + Node (无谓词)，且 Step 1 有谓词
     // 则跳过 Step 0，直接在 Step 1 使用 FindAll(Descendants)
@@ -139,6 +154,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
     }
     
     for (step_idx, step) in steps.iter().enumerate() {
+        let step_start = std::time::Instant::now();
         // 如果跳过了 Step 0，直接处理 Step 1
         if skip_step_0 && step_idx == 0 {
             log::debug!("[XPath step_through] Step 0: SKIPPED (merged with Step 1)");
@@ -165,11 +181,16 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
         
         // 分析谓词，决定是否使用 FindAll 优化
         use crate::xpath::uia_condition;
-        let analysis = uia_condition::analyze_predicates(&step.predicates);
+        let analysis = uia_condition::analyze_predicates(&step.predicates, Some(&step.test));
         
         let should_optimize = analysis.can_optimize 
             && matches!(effective_axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf)
-            && analysis.expected_benefit >= 0.5; // 至少 50% 的谓词可以用 Condition
+            && analysis.expected_benefit >= 0.5
+        // ★ 即使没有谓词（can_optimize=false），如果 NodeTest 是具体类型名，
+        // 也走优化路径（用 ControlType Condition 替代 Walker 遍历）
+        || (matches!(effective_axis, Axis::Child | Axis::Descendant | Axis::DescendantOrSelf)
+            && analysis.expected_benefit >= 0.5
+            && matches!(&step.test, NodeTest::Name(_)));
         
         log::debug!("[XPath step_through] Step {} optimization: can_optimize={}, axis_ok={}, benefit={:.2}, should_optimize={}",
             step_idx, analysis.can_optimize, 
@@ -180,22 +201,55 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
         // When should_optimize is true, we'll use FindAllBuildCache instead of FindAll,
         // which prefetches commonly accessed properties (Name, ControlType, ClassName, etc.)
         // into the UIA cache. This eliminates per-element cross-process COM calls.
-        let cache_request = if should_optimize {
+        // SAFETY: nodes is guaranteed non-empty by the guard at the top of this function.
+        let cache_request = if should_optimize && !nodes.is_empty() {
             crate::element::create_default_cache_request(&nodes[0].automation).ok()
         } else {
             None
         };
 
-        for n in &nodes {
+        for (node_idx, n) in nodes.iter().enumerate() {
+            let node_start = std::time::Instant::now();
             let (candidates, predicates_fully_applied) = if should_optimize {
                 // ★ 两阶段过滤：先用 UIA Condition 快速筛选 + BuildCache 预取属性
+                let cond_build_start = std::time::Instant::now();
                 match uia_condition::build_condition_from_analysis(
                     &n.automation,
                     &step.predicates,
-                    &analysis
+                    &analysis,
+                    Some(&step.test),  // ★ 传入 node_test 用于无谓词 step 的 ControlType 优化
                 ) {
-                    Ok(condition) => {
+                    Ok(mut condition) => {
+                        log::info!("[PERF][XPATH] step={} node={} build_condition: {}ms", step_idx, node_idx, cond_build_start.elapsed().as_millis());
+                        
+                        // ★ Fast/Strict 模式：追加 IsOffscreen=false 条件，让 UIA 服务端过滤掉不可见元素，
+                        // 大幅减少返回的候选节点数（如 Chrome WebView 的 Group 有 2257 个子节点，
+                        // 大部分是 offscreen 的，加上此条件后 FindAllBuildCache 只返回可见的）。
+                        if ctx.strict_control_view {
+                            // 使用与 uia_condition.rs 相同的布尔 VARIANT 构造方式 (VT_BOOL)
+                            let is_offscreen_false = unsafe {
+                                use windows::Win32::System::Variant::*;
+                                let mut variant = VARIANT::default();
+                                let var_ptr = &mut variant as *mut VARIANT;
+                                std::ptr::write(var_ptr as *mut VARENUM, VT_BOOL);
+                                // bool_val=0 表示 VARIANT_FALSE
+                                let bool_ptr = (var_ptr as *mut u8).add(8) as *mut i16;
+                                std::ptr::write(bool_ptr, 0i16);
+                                n.automation.CreatePropertyCondition(
+                                    windows::Win32::UI::Accessibility::UIA_IsOffscreenPropertyId, &variant
+                                )
+                            };
+                            if let Ok(offscreen_cond) = is_offscreen_false {
+                                condition = unsafe {
+                                    n.automation.CreateAndCondition(&condition, &offscreen_cond)
+                                        .unwrap_or(condition)
+                                };
+                                log::info!("[PERF][XPATH] step={} node={} appended IsOffscreen=false condition (strict mode)", step_idx, node_idx);
+                            }
+                        }
+                        
                         // 阶段 1：UIA 引擎过滤（Control View）+ BuildCache 预取属性
+                        let uia_start = std::time::Instant::now();
                         let control_view_result = match (&effective_axis, &cache_request) {
                             (Axis::Child, Some(cr)) => {
                                 n.find_children_with_condition_cached(&condition, cr)
@@ -230,6 +284,24 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                             },
                             _ => axes::select_axis(n, step.axis)?
                         };
+                        let uia_ms = uia_start.elapsed().as_millis();
+                        log::info!("[PERF][XPATH] step={} node={} FindAllBuildCache({:?}): {}ms, {} results", step_idx, node_idx, effective_axis, uia_ms, control_view_result.len());
+                        
+                        // ★ 对比测试：同时测量 children() (ControlViewWalker) 的耗时
+                        if effective_axis == Axis::Child && ctx.strict_control_view {
+                            let cmp_start = std::time::Instant::now();
+                            let cmp_children = n.children().unwrap_or_default();
+                            let cmp_ms = cmp_start.elapsed().as_millis();
+                            log::info!("[PERF][XPATH] step={} node={} children() comparison: {}ms, {} nodes (vs FindAllBuildCache: {}ms)", 
+                                step_idx, node_idx, cmp_ms, cmp_children.len(), uia_ms);
+                            
+                            // ★ 同时测量 raw_children() 的子节点数
+                            let raw_start = std::time::Instant::now();
+                            let raw_children = n.raw_children().unwrap_or_default();
+                            let raw_ms = raw_start.elapsed().as_millis();
+                            log::info!("[PERF][XPATH] step={} node={} raw_children() comparison: {}ms, {} nodes", 
+                                step_idx, node_idx, raw_ms, raw_children.len());
+                        }
 
                         // ★ 自动回退：当 Control View 的 FindAll 返回空结果时，
                         // 说明目标元素可能只存在于 Raw View（如 Qt 中间层 Group），
@@ -241,12 +313,14 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                             && control_view_result.is_empty()
                             && !step.predicates.is_empty()
                         {
-                            log::debug!("[XPath step_through] FindAll({:?}) returned 0, falling back to raw tree traversal", effective_axis);
+                            let raw_start = std::time::Instant::now();
+                            log::info!("[PERF][XPATH] step={} node={} FindAll returned 0, falling back to raw tree", step_idx, node_idx);
                             let raw_candidates = match effective_axis {
                                 Axis::Child => n.raw_children().unwrap_or_default(),
                                 Axis::Descendant | Axis::DescendantOrSelf => n.raw_descendants().unwrap_or_default(),
                                 _ => Vec::new(),
                             };
+                            log::info!("[PERF][XPATH] step={} node={} raw_children/descendants: {}ms, {} candidates", step_idx, node_idx, raw_start.elapsed().as_millis(), raw_candidates.len());
                             if raw_candidates.is_empty() {
                                 control_view_result
                             } else {
@@ -275,6 +349,7 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         
                         // 阶段 2：Rust 层应用复杂谓词（仅当 FindAll 有结果时才需要此阶段，
                         // 因为 raw tree 回退已经应用了全部谓词）
+                        let complex_start = std::time::Instant::now();
                         let candidates = if predicates_fully_applied {
                             filtered
                         } else if !analysis.complex_indices.is_empty() {
@@ -287,42 +362,59 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                         } else {
                             filtered
                         };
+                        if !analysis.complex_indices.is_empty() {
+                            log::info!("[PERF][XPATH] step={} node={} complex_predicates: {}ms", step_idx, node_idx, complex_start.elapsed().as_millis());
+                        }
                         (candidates, predicates_fully_applied)
                     },
                     Err(e) => {
                         // Condition 构建失败，回退到 axes 遍历
+                        log::info!("[PERF][XPATH] step={} node={} build_condition failed: {}ms", step_idx, node_idx, cond_build_start.elapsed().as_millis());
+                        let fallback_start = std::time::Instant::now();
                         // 严格模式下使用 ControlViewWalker，普通模式使用 RawViewWalker
-                        if ctx.strict_control_view {
+                        let result = if ctx.strict_control_view {
                             log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to strict control tree", e);
                             (axes::select_axis_strict(n, step.axis)?, false)
                         } else {
                             log::warn!("[XPath step_through] Condition build failed: {:?}, falling back to raw tree", e);
                             (axes::select_axis(n, step.axis)?, false)
-                        }
+                        };
+                        log::info!("[PERF][XPATH] step={} node={} axis_fallback({:?}): {}ms, {} results", step_idx, node_idx, effective_axis, fallback_start.elapsed().as_millis(), result.0.len());
+                        result
                     }
                 }
             } else {
                 // 不优化的情况
                 // 严格模式下使用 ControlViewWalker，普通模式使用 RawViewWalker
-                if step.axis == Axis::Attribute {
+                let fallback_start = std::time::Instant::now();
+                let result = if step.axis == Axis::Attribute {
                     (Vec::new(), false)
                 } else if ctx.strict_control_view {
                     (axes::select_axis_strict(n, step.axis)?, false)
                 } else {
                     (axes::select_axis(n, step.axis)?, false)
-                }
+                };
+                log::info!("[PERF][XPATH] step={} node={} no_opt axis({:?}): {}ms, {} results", step_idx, node_idx, effective_axis, fallback_start.elapsed().as_millis(), result.0.len());
+                result
             };
             
             log::debug!("[XPath step_through] Step {}: {} candidates from axis", 
                 step_idx, candidates.len());
             
-            // 节点测试（仅对优化路径需要，非优化路径 axes::select_axis 已返回正确节点）
-            let mut after_test: Vec<UiElement> = Vec::new();
-            for c in candidates {
-                if node_test_match(&c, &step.test, step.axis) {
-                    after_test.push(c);
+            // 节点测试（仅对非优化路径需要，优化路径已通过 UIA Condition 过滤了 ControlType）
+            let mut after_test: Vec<UiElement> = if should_optimize {
+                // ★ 优化路径：UIA Condition 已经通过 ControlType 过滤，
+                // 跳过 node_test_match 避免冗余的 COM 调用
+                candidates
+            } else {
+                let mut filtered = Vec::new();
+                for c in candidates {
+                    if node_test_match(&c, &step.test, step.axis) {
+                        filtered.push(c);
+                    }
                 }
-            }
+                filtered
+            };
             log::debug!("[XPath step_through] Step {}: {} after node test", step_idx, after_test.len());
 
             if !predicates_fully_applied && !step.predicates.is_empty() {
@@ -330,16 +422,34 @@ fn step_through(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) -> Res
                 log::debug!("[XPath step_through] Step {}: {} after predicate filter", step_idx, after_test.len());
             }
 
-            // 去重
-            for c in after_test {
-                if !next.iter().any(|x| x.equals(&c)) {
-                    next.push(c);
+            // ★ 去重：使用 RuntimeId 的 HashSet 做 O(1) 查重，
+            // 替代原来的 O(N^2) equals() 线性扫描。
+            // equals() 每次都是跨进程 COM 调用，在 Descendant 搜索结果集大时是主要瓶颈。
+            let mut seen_ids: HashSet<Vec<i32>> = HashSet::new();
+            // 先收集已存在节点的 RuntimeId
+            for existing in &next {
+                if let Some(rid) = existing.runtime_id() {
+                    seen_ids.insert(rid);
                 }
             }
+            for c in after_test {
+                if let Some(rid) = c.runtime_id() {
+                    if seen_ids.insert(rid) {
+                        next.push(c);
+                    }
+                } else {
+                    // Fallback: 没有 RuntimeId 的节点用 equals() 比较
+                    if !next.iter().any(|x| x.equals(&c)) {
+                        next.push(c);
+                    }
+                }
+            }
+            log::info!("[PERF][XPATH] step={} node={} total: {}ms", step_idx, node_idx, node_start.elapsed().as_millis());
         }
         nodes = next;
-        log::debug!("[XPath step_through] Step {}: {} nodes after step", step_idx, nodes.len());
+        log::info!("[PERF][XPATH] step={} done: {}ms, {} nodes after step", step_idx, step_start.elapsed().as_millis(), nodes.len());
     }
+    log::info!("[PERF][XPATH] step_through total: {}ms", step_through_start.elapsed().as_millis());
     
     // 应用可见性过滤（在所有步骤完成后）
     if ctx.visibility_filter != super::context::VisibilityFilter::All {

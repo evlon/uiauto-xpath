@@ -22,8 +22,12 @@ pub struct PredicateAnalysis {
     pub expected_benefit: f64,
 }
 
-/// 分析 Step 的谓词，判断是否适合用 FindAll 优化
-pub fn analyze_predicates(predicates: &[Expr]) -> PredicateAnalysis {
+/// 分析 Step 的谓词，判断是否适合用 FindAll 优化。
+///
+/// ★ 优化：即使没有谓词，如果 NodeTest 是具体类型（如 Group, Text, Document），
+/// 也可以用 ControlType Condition 走 FindAllBuildCache 快速路径，避免 Walker 逐一遍历。
+/// 这通过 `node_test_hint` 字段传递给调用方。
+pub fn analyze_predicates(predicates: &[Expr], node_test: Option<&NodeTest>) -> PredicateAnalysis {
     let mut simple_indices = Vec::new();
     let mut complex_indices = Vec::new();
     
@@ -49,9 +53,16 @@ pub fn analyze_predicates(predicates: &[Expr]) -> PredicateAnalysis {
     log::debug!("[UIA Condition] Analysis result: simple={}, complex={}, can_optimize={}", 
         simple_indices.len(), complex_indices.len(), can_optimize);
     
-    // 计算预期收益：简单谓词越多，收益越高
+    // ★ 计算预期收益：
+    // - 有简单谓词时，benefit = simple / total
+    // - 无谓词但有 NodeTest Name（如 Group, Text），benefit = 0.5（用 ControlType Condition）
     let expected_benefit = if predicates.is_empty() {
-        0.0
+        // 无谓词但有 NodeTest Name → 可以用 ControlType Condition 替代 Walker 遍历
+        if let Some(NodeTest::Name(_)) = node_test {
+            0.5
+        } else {
+            0.0
+        }
     } else {
         simple_indices.len() as f64 / predicates.len() as f64
     };
@@ -113,11 +124,16 @@ fn is_string_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::String(_))
 }
 
-/// 从简单谓词构建 UIA Condition
+/// 从简单谓词构建 UIA Condition。
+///
+/// ★ 优化：当没有谓词但有 node_test_hint 时，构造 ControlType Condition。
+/// 这允许无谓词的 Step（如 /Group, /Text）也走 FindAllBuildCache 快速路径，
+/// 避免 Walker 逐一遍历所有子元素。
 pub fn build_condition_from_analysis(
     auto: &IUIAutomation,
     predicates: &[Expr],
-    analysis: &PredicateAnalysis
+    analysis: &PredicateAnalysis,
+    node_test_hint: Option<&NodeTest>,
 ) -> Result<IUIAutomationCondition> {
     let mut conditions = Vec::new();
     
@@ -127,6 +143,35 @@ pub fn build_condition_from_analysis(
         let pred = &predicates[idx];
         // 递归提取并构建条件
         collect_conditions_from_expr(auto, pred, &mut conditions)?;
+    }
+    
+    // ★ 如果谓词分析结果为空（无谓词 step），但 node_test 是具体类型名，
+    // 则构造 ControlType Condition 来加速
+    if conditions.is_empty() {
+        if let Some(NodeTest::Name(type_name)) = node_test_hint {
+            if let Some(control_type_id) = name_to_id(type_name) {
+                log::debug!(
+                    "[UIA Condition] Building ControlType condition for '{}' (id={}) (predicate-less step optimization)",
+                    type_name, control_type_id
+                );
+                unsafe {
+                    let variant = VARIANT::from(control_type_id);
+                    let cond = auto.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant)
+                        .map_err(|e| {
+                            XPathError::EvalError(format!(
+                                "CreatePropertyCondition for ControlType '{}' failed: {:?}",
+                                type_name, e
+                            ))
+                        })?;
+                    conditions.push(cond);
+                }
+            } else {
+                log::debug!(
+                    "[UIA Condition] Unknown ControlType '{}' for predicate-less step, cannot build condition",
+                    type_name
+                );
+            }
+        }
     }
     
     log::debug!("[UIA Condition] Built {} conditions total", conditions.len());
@@ -271,6 +316,9 @@ fn is_bool_property(prop_id: UIA_PROPERTY_ID) -> bool {
 }
 
 /// 在 Rust 层应用复杂谓词过滤
+///
+/// ★ 优化：避免每个元素克隆 Context（含 HashMap + UiElement COM 引用），
+/// 改为原地复用同一个 Context 实例，只替换 node 字段。
 pub fn apply_complex_predicates(
     candidates: Vec<UiElement>,
     predicates: &[Expr],
@@ -282,11 +330,16 @@ pub fn apply_complex_predicates(
     }
     
     let mut result = Vec::new();
+    // ★ 使用一个可变的 Context 副本，避免每次循环克隆
+    let mut sub_ctx = ctx.clone();
     for elem in candidates {
+        sub_ctx.node = elem;
+        sub_ctx.position = 1;
+        sub_ctx.size = 1;
+        
         let mut keep = true;
         for &idx in complex_indices {
             let pred = &predicates[idx];
-            let sub_ctx = ctx.with_node(elem.clone(), 1, 1);
             let eval_result = eval_with_attrs(pred, &sub_ctx)?;
             if !eval_result.to_boolean() {
                 keep = false;
@@ -298,7 +351,8 @@ pub fn apply_complex_predicates(
             }
         }
         if keep {
-            result.push(elem);
+            // ★ 取出 elem 放回结果（所有权在 sub_ctx.node 中）
+            result.push(sub_ctx.node.clone());
         }
     }
     Ok(result)
