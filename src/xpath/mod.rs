@@ -54,9 +54,33 @@ impl XPath {
     }
 
     /// 严格 ControlView 模式：只使用 ControlViewWalker，不回退 RawViewWalker。
-    /// 用于 `[fast]` 前缀的 XPath 定位 —— FindAll 返回空即空。
+    /// 用于 `[fast]` 前缀的 XPath 定位 —— FindFirst 返回空即空。
     pub fn select_nodes_strict(&self, root: &UiElement) -> Result<Vec<UiElement>> {
         let ctx = context::Context::new(root.clone()).with_strict_control_view();
+        match evaluator::eval(&self.expr, &ctx)? {
+            value::Value::NodeSet(ns) => Ok(ns),
+            other => Err(crate::error::XPathError::TypeError(
+                format!("expected node-set, got {:?}", other.type_name())
+            )),
+        }
+    }
+
+    /// 带完整选项的节点搜索。
+    /// - `strict_control_view`: true = ControlView 模式（不回退 RawView），false = RawView 模式
+    /// - `enable_findall`: true = FindFirst 没找到时回退 FindAll，false = 只走 FindFirst 快路径
+    pub fn select_nodes_with_options(
+        &self,
+        root: &UiElement,
+        strict_control_view: bool,
+        enable_findall: bool,
+    ) -> Result<Vec<UiElement>> {
+        let mut ctx = context::Context::new(root.clone());
+        if strict_control_view {
+            ctx = ctx.with_strict_control_view();
+        }
+        if enable_findall {
+            ctx = ctx.with_enable_findall();
+        }
         match evaluator::eval(&self.expr, &ctx)? {
             value::Value::NodeSet(ns) => Ok(ns),
             other => Err(crate::error::XPathError::TypeError(
