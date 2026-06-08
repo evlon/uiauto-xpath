@@ -31,7 +31,7 @@ pub struct OptimizeOptions {
 impl Default for OptimizeOptions {
     fn default() -> Self {
         Self {
-            dynamic_class_to_starts_with: true,
+            dynamic_class_to_starts_with: false,
             remove_framework_id: true,
             remove_redundant_control_type: true,
             max_intermediate_steps: 2,
