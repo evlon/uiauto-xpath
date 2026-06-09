@@ -47,6 +47,9 @@ pub struct OptimizeResult {
     pub anchor_relative: String,
     /// 备选：最短绝对路径（仅保留分值最高的两个节点）
     pub minimal: String,
+    /// Leaf-First 路径：先定位叶子节点，再用 ancestor/parent 轴约束祖先
+    /// 适用于 Chrome WebView 等场景，UIA FindFirst 可能找不到中间层但能找到叶子
+    pub leaf_first: String,
     /// 被选为锚点的节点描述（调试用）
     pub anchor_desc: String,
     /// 锚点节点索引（在原始节点列表中的位置）
@@ -116,6 +119,7 @@ pub fn optimize(xpath: &str, opts: &OptimizeOptions) -> Result<OptimizeResult> {
 
     let anchor_relative = build_anchor_relative(&nodes, anchor_idx, target_idx, opts);
     let minimal = build_minimal(&nodes, &scores, target_idx, opts);
+    let leaf_first = build_leaf_first(&nodes, &scores, target_idx, opts);
 
     let anchor_desc = anchor_idx
         .map(|i| format!("{}[{}] (score={})", nodes[i].tag, i + 1, scores[i]))
@@ -131,6 +135,7 @@ pub fn optimize(xpath: &str, opts: &OptimizeOptions) -> Result<OptimizeResult> {
     Ok(OptimizeResult {
         anchor_relative,
         minimal,
+        leaf_first,
         anchor_desc,
         anchor_index: anchor_idx,
         target_index: target_idx,
@@ -208,6 +213,85 @@ fn build_anchor_relative(
             }
         }
     }
+}
+
+/// 策略三：Leaf-First XPath — 先定位叶子节点，再用 ancestor/parent 轴约束祖先
+///
+/// 格式示例：
+/// - `//Group[@AutomationId='js_article'][parent::Group[@AutomationId='activity-detail']]`
+/// - `//Text[@Name='hello'][ancestor::Document[@AutomationId='root']]`
+///
+/// 优势：在 Chrome WebView 等场景下，UIA FindFirst(Subtree) 可能找不到中间层节点，
+/// 但能找到叶子节点。找到叶子后用 parent/ancestor 轴验证路径，避免 step-through 遍历。
+///
+/// 规则：
+/// 1. 叶子节点用 `//Tag[conditions]` 表示
+/// 2. 中间步骤中，只有分值 > 0 的节点才添加 ancestor 约束（避免无意义谓词）
+/// 3. 叶子的直接父节点用 `parent::` 轴（更精确），其他祖先用 `ancestor::` 轴
+/// 4. 祖先约束从近到远排列（parent 在前，ancestor 在后）
+/// 5. 只保留分值最高的 MAX_ANCESTOR_CONSTRAINTS 个祖先，避免约束爆炸
+fn build_leaf_first(
+    nodes: &[ParsedNode],
+    scores: &[u32],
+    target_idx: usize,
+    opts: &OptimizeOptions,
+) -> String {
+    if nodes.is_empty() {
+        return String::new();
+    }
+
+    // 最多保留的祖先约束数量
+    const MAX_ANCESTOR_CONSTRAINTS: usize = 2;
+
+    // 叶子节点
+    let target_str = render_node(&nodes[target_idx], true, opts);
+
+    if target_idx == 0 {
+        // 只有叶子一个节点，直接返回
+        return format!("//{}", target_str);
+    }
+
+    // 收集候选祖先（分值 > 0，不含 starts-with/contains，且不是目标节点本身）
+    // 同时记录原始索引和分值，用于排序
+    let mut candidates: Vec<(usize, u32, String, &str)> = Vec::new(); // (index, score, rendered_str, axis)
+
+    for i in (0..target_idx).rev() {
+        // 跳过无属性的泛型节点（如 Pane、Group 没有任何属性）
+        if scores[i] == 0 {
+            continue;
+        }
+
+        let ancestor_str = render_node(&nodes[i], false, opts);
+        // 去掉 starts-with 等函数谓词的祖先——它们在 ancestor 谓词中不够精确
+        // 只保留精确匹配属性的祖先
+        if ancestor_str.contains("starts-with(") || ancestor_str.contains("contains(") {
+            continue;
+        }
+
+        let axis = if i == target_idx - 1 { "parent" } else { "ancestor" };
+        candidates.push((i, scores[i], ancestor_str, axis));
+    }
+
+    if candidates.is_empty() {
+        // 没有有意义的祖先约束，退化为简单的 //Target
+        return format!("//{}", target_str);
+    }
+
+    // 按分值降序排序，只保留前 MAX_ANCESTOR_CONSTRAINTS 个
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.truncate(MAX_ANCESTOR_CONSTRAINTS);
+
+    // 按原始索引升序排列（近→远），确保约束顺序正确
+    // 然后按近→远输出（parent 在前，ancestor 在后）
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // 构建 leaf-first XPath: //Target[parent::X][ancestor::Y]
+    let mut result = format!("//{}", target_str);
+    for (_, _, ancestor_str, axis) in &candidates {
+        result.push_str(&format!("[{}::{}]", axis, ancestor_str));
+    }
+
+    result
 }
 
 /// 策略二：只保留分值最高的前驱 + 目标，用 // 连接
