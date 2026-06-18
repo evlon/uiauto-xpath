@@ -281,7 +281,7 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
 
     let skip_step_0 = compute_skip_step_0(steps);
     if skip_step_0 {
-        log::info!("[XPath ControlView] ★ Skipping Step 0 (DescendantOrSelf/Node), merging with Step 1");
+        log::debug!("[XPath ControlView] ★ Skipping Step 0 (DescendantOrSelf/Node), merging with Step 1");
     }
 
     for (step_idx, step) in steps.iter().enumerate() {
@@ -316,7 +316,7 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
                     &n.automation, &step.predicates, &analysis, Some(&step.test),
                 ) {
                     Ok(mut condition) => {
-                        log::info!("[PERF][Control] step={} node={} build_condition: {}ms",
+                        log::debug!("[PERF][Control] step={} node={} build_condition: {}ms",
                             step_idx, node_idx, cond_start.elapsed().as_millis());
 
                         // 始终追加 IsOffscreen=false
@@ -328,7 +328,7 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
 
                         let mut candidates = match uia_search_first(n, &condition, effective_axis, cache_request.as_ref()) {
                             Some(elem) => {
-                                log::info!("[PERF][Control] step={} node={} FindFirst({:?}): {}ms, 1 result",
+                                log::debug!("[PERF][Control] step={} node={} FindFirst({:?}): {}ms, 1 result",
                                     step_idx, node_idx, effective_axis, search_start.elapsed().as_millis());
                                 vec![elem]
                             }
@@ -337,11 +337,11 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
                                 if ctx.enable_findall {
                                     tried_findall = true;
                                     let all = uia_search_all(n, &condition, effective_axis, cache_request.as_ref());
-                                    log::info!("[PERF][Control] step={} node={} FindFirst=0, FindAll({:?}): {}ms, {} results",
+                                    log::debug!("[PERF][Control] step={} node={} FindFirst=0, FindAll({:?}): {}ms, {} results",
                                         step_idx, node_idx, effective_axis, search_start.elapsed().as_millis(), all.len());
                                     all
                                 } else {
-                                    log::info!("[PERF][Control] step={} node={} FindFirst({:?}): {}ms, 0 results (enable_findall=false)",
+                                    log::debug!("[PERF][Control] step={} node={} FindFirst({:?}): {}ms, 0 results (enable_findall=false)",
                                         step_idx, node_idx, effective_axis, search_start.elapsed().as_millis());
                                     Vec::new()
                                 }
@@ -354,14 +354,14 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
                             candidates = uia_condition::apply_complex_predicates(
                                 candidates, &step.predicates, &analysis.complex_indices, ctx
                             )?;
-                            log::info!("[PERF][Control] step={} node={} complex_predicates: {}ms, {} after",
+                            log::debug!("[PERF][Control] step={} node={} complex_predicates: {}ms, {} after",
                                 step_idx, node_idx, complex_start.elapsed().as_millis(), candidates.len());
                         }
 
                         // 如果复杂谓词过滤后为空，且未尝试过 FindAll，且 enable_findall=true，再试 FindAll
                         if candidates.is_empty() && ctx.enable_findall && !tried_findall {
                             let all = uia_search_all(n, &condition, effective_axis, cache_request.as_ref());
-                            log::info!("[PERF][Control] step={} node={} complex predicates rejected FindFirst, trying FindAll: {} results",
+                            log::debug!("[PERF][Control] step={} node={} complex predicates rejected FindFirst, trying FindAll: {} results",
                                 step_idx, node_idx, all.len());
                             if !analysis.complex_indices.is_empty() {
                                 candidates = uia_condition::apply_complex_predicates(
@@ -383,7 +383,7 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
                         log::warn!("[Control] Condition build failed: {:?}, falling back to ControlViewWalker", e);
                         let fb_start = std::time::Instant::now();
                         let result = axes::select_axis_strict(n, step.axis)?;
-                        log::info!("[PERF][Control] step={} node={} ControlViewWalker fallback({:?}): {}ms, {} results",
+                        log::debug!("[PERF][Control] step={} node={} ControlViewWalker fallback({:?}): {}ms, {} results",
                             step_idx, node_idx, effective_axis, fb_start.elapsed().as_millis(), result.len());
                         (result, false)
                     }
@@ -396,7 +396,7 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
                 } else {
                     axes::select_axis_strict(n, step.axis)?
                 };
-                log::info!("[PERF][Control] step={} node={} no_opt ControlViewWalker({:?}): {}ms, {} results",
+                log::debug!("[PERF][Control] step={} node={} no_opt ControlViewWalker({:?}): {}ms, {} results",
                     step_idx, node_idx, effective_axis, fb_start.elapsed().as_millis(), result.len());
                 (result, false)
             };
@@ -419,12 +419,12 @@ fn step_through_control(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context
             let deduped = dedup_into(&next, after_test);
             next.extend(deduped);
 
-            log::info!("[PERF][Control] step={} node={} total: {}ms", step_idx, node_idx, node_start.elapsed().as_millis());
+            log::debug!("[PERF][Control] step={} node={} total: {}ms", step_idx, node_idx, node_start.elapsed().as_millis());
         }
         nodes = next;
-        log::info!("[PERF][Control] step={} done: {}ms, {} nodes", step_idx, step_start.elapsed().as_millis(), nodes.len());
+        log::debug!("[PERF][Control] step={} done: {}ms, {} nodes", step_idx, step_start.elapsed().as_millis(), nodes.len());
     }
-    log::info!("[PERF][Control] step_through total: {}ms", total_start.elapsed().as_millis());
+    log::debug!("[PERF][Control] step_through total: {}ms", total_start.elapsed().as_millis());
 
     nodes = apply_visibility_filter(nodes, ctx.visibility_filter);
     Ok(nodes)
@@ -448,7 +448,7 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
 
     let skip_step_0 = compute_skip_step_0(steps);
     if skip_step_0 {
-        log::info!("[XPath RawView] ★ Skipping Step 0 (DescendantOrSelf/Node), merging with Step 1");
+        log::debug!("[XPath RawView] ★ Skipping Step 0 (DescendantOrSelf/Node), merging with Step 1");
     }
 
     for (step_idx, step) in steps.iter().enumerate() {
@@ -483,7 +483,7 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                     &n.automation, &step.predicates, &analysis, Some(&step.test),
                 ) {
                     Ok(mut condition) => {
-                        log::info!("[PERF][Raw] step={} node={} build_condition: {}ms",
+                        log::debug!("[PERF][Raw] step={} node={} build_condition: {}ms",
                             step_idx, node_idx, cond_start.elapsed().as_millis());
 
                         // 始终追加 IsOffscreen=false
@@ -495,7 +495,7 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
 
                         let mut candidates = match uia_search_first(n, &condition, effective_axis, cache_request.as_ref()) {
                             Some(elem) => {
-                                log::info!("[PERF][Raw] step={} node={} FindFirst({:?}): {}ms, 1 result",
+                                log::debug!("[PERF][Raw] step={} node={} FindFirst({:?}): {}ms, 1 result",
                                     step_idx, node_idx, effective_axis, search_start.elapsed().as_millis());
                                 vec![elem]
                             }
@@ -504,11 +504,11 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                                 if ctx.enable_findall {
                                     tried_findall = true;
                                     let all = uia_search_all(n, &condition, effective_axis, cache_request.as_ref());
-                                    log::info!("[PERF][Raw] step={} node={} FindFirst=0, FindAll({:?}): {}ms, {} results",
+                                    log::debug!("[PERF][Raw] step={} node={} FindFirst=0, FindAll({:?}): {}ms, {} results",
                                         step_idx, node_idx, effective_axis, search_start.elapsed().as_millis(), all.len());
                                     all
                                 } else {
-                                    log::info!("[PERF][Raw] step={} node={} FindFirst({:?}): {}ms, 0 results (enable_findall=false)",
+                                    log::debug!("[PERF][Raw] step={} node={} FindFirst({:?}): {}ms, 0 results (enable_findall=false)",
                                         step_idx, node_idx, effective_axis, search_start.elapsed().as_millis());
                                     Vec::new()
                                 }
@@ -521,14 +521,14 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                             candidates = uia_condition::apply_complex_predicates(
                                 candidates, &step.predicates, &analysis.complex_indices, ctx
                             )?;
-                            log::info!("[PERF][Raw] step={} node={} complex_predicates: {}ms, {} after",
+                            log::debug!("[PERF][Raw] step={} node={} complex_predicates: {}ms, {} after",
                                 step_idx, node_idx, complex_start.elapsed().as_millis(), candidates.len());
                         }
 
                         // 如果复杂谓词过滤后为空，且未尝试过 FindAll，且 enable_findall=true，再试 FindAll
                         if candidates.is_empty() && ctx.enable_findall && !tried_findall {
                             let all = uia_search_all(n, &condition, effective_axis, cache_request.as_ref());
-                            log::info!("[PERF][Raw] step={} node={} complex predicates rejected FindFirst, trying FindAll: {} results",
+                            log::debug!("[PERF][Raw] step={} node={} complex predicates rejected FindFirst, trying FindAll: {} results",
                                 step_idx, node_idx, all.len());
                             if !analysis.complex_indices.is_empty() {
                                 candidates = uia_condition::apply_complex_predicates(
@@ -544,13 +544,13 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                         // 只存在于 RawView。回退到 RawViewWalker 遍历 + Rust 层全谓词求值。
                         if candidates.is_empty() && !step.predicates.is_empty() {
                             let raw_start = std::time::Instant::now();
-                            log::info!("[PERF][Raw] step={} node={} UIA search returned 0, falling back to RawViewWalker", step_idx, node_idx);
+                            log::debug!("[PERF][Raw] step={} node={} UIA search returned 0, falling back to RawViewWalker", step_idx, node_idx);
                             let raw_candidates = match effective_axis {
                                 Axis::Child => n.raw_children().unwrap_or_default(),
                                 Axis::Descendant | Axis::DescendantOrSelf => n.raw_descendants().unwrap_or_default(),
                                 _ => Vec::new(),
                             };
-                            log::info!("[PERF][Raw] step={} node={} raw_children/descendants: {}ms, {} candidates",
+                            log::debug!("[PERF][Raw] step={} node={} raw_children/descendants: {}ms, {} candidates",
                                 step_idx, node_idx, raw_start.elapsed().as_millis(), raw_candidates.len());
                             if !raw_candidates.is_empty() {
                                 let after_test: Vec<UiElement> = raw_candidates
@@ -575,7 +575,7 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                         log::warn!("[Raw] Condition build failed: {:?}, falling back to RawViewWalker", e);
                         let fb_start = std::time::Instant::now();
                         let result = axes::select_axis(n, step.axis)?;
-                        log::info!("[PERF][Raw] step={} node={} RawViewWalker fallback({:?}): {}ms, {} results",
+                        log::debug!("[PERF][Raw] step={} node={} RawViewWalker fallback({:?}): {}ms, {} results",
                             step_idx, node_idx, effective_axis, fb_start.elapsed().as_millis(), result.len());
                         (result, false)
                     }
@@ -588,7 +588,7 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
                 } else {
                     axes::select_axis(n, step.axis)?
                 };
-                log::info!("[PERF][Raw] step={} node={} no_opt RawViewWalker({:?}): {}ms, {} results",
+                log::debug!("[PERF][Raw] step={} node={} no_opt RawViewWalker({:?}): {}ms, {} results",
                     step_idx, node_idx, effective_axis, fb_start.elapsed().as_millis(), result.len());
                 (result, false)
             };
@@ -611,12 +611,12 @@ fn step_through_raw(mut nodes: Vec<UiElement>, steps: &[Step], ctx: &Context) ->
             let deduped = dedup_into(&next, after_test);
             next.extend(deduped);
 
-            log::info!("[PERF][Raw] step={} node={} total: {}ms", step_idx, node_idx, node_start.elapsed().as_millis());
+            log::debug!("[PERF][Raw] step={} node={} total: {}ms", step_idx, node_idx, node_start.elapsed().as_millis());
         }
         nodes = next;
-        log::info!("[PERF][Raw] step={} done: {}ms, {} nodes", step_idx, step_start.elapsed().as_millis(), nodes.len());
+        log::debug!("[PERF][Raw] step={} done: {}ms, {} nodes", step_idx, step_start.elapsed().as_millis(), nodes.len());
     }
-    log::info!("[PERF][Raw] step_through total: {}ms", total_start.elapsed().as_millis());
+    log::debug!("[PERF][Raw] step_through total: {}ms", total_start.elapsed().as_millis());
 
     nodes = apply_visibility_filter(nodes, ctx.visibility_filter);
     Ok(nodes)
