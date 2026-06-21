@@ -126,8 +126,8 @@ pub fn call(name: &str, args: Vec<Value>, ctx: &Context) -> Result<Value> {
             Value::String(v.to_string_value())
         }
         "concat" => {
-            if args.len() < 2 {
-                return Err(XPathError::Arity { name: name.into(), expected: ">=2".into(), got: args.len() });
+            if args.is_empty() {
+                return Err(XPathError::Arity { name: name.into(), expected: ">=1".into(), got: 0 });
             }
             Value::String(args.iter().map(|a| a.to_string_value()).collect::<String>())
         }
